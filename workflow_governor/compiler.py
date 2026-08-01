@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Iterable
@@ -117,6 +118,13 @@ def _validate_roles(
                 f"role_refs.{role['role_id']}.digest",
                 f"role drift: expected {role['digest']}, observed {observed}",
             )
+        try:
+            role_toml = tomllib.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ContractError(role["path"], f"invalid role TOML: {exc}") from exc
+        instructions = role_toml.get("developer_instructions")
+        if not isinstance(instructions, str) or not instructions.strip():
+            raise ContractError(role["path"], "role TOML must contain non-empty developer_instructions")
         verified.append({**role, "observed_digest": observed})
     return sorted(verified, key=lambda item: item["role_id"])
 
