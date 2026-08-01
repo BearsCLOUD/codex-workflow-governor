@@ -1,3 +1,18 @@
 {
-  "mcpServers": {}
+  "workflow-governor": {
+    "command": "python3",
+    "args": [
+      "${PLUGIN_ROOT}/scripts/workflow_mcp.py",
+      "--surface",
+      "reader"
+    ]
+  },
+  "workflow-governor-maintainer": {
+    "command": "python3",
+    "args": [
+      "${PLUGIN_ROOT}/scripts/workflow_mcp.py",
+      "--surface",
+      "maintainer"
+    ]
+  }
 }

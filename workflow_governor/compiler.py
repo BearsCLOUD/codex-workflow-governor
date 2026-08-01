@@ -49,12 +49,19 @@ def discover_rule_lines(path: Path) -> list[int]:
         raise ContractError(str(path), str(exc)) from exc
     discovered: list[int] = []
     in_fence = False
+    in_managed_routing = False
     for number, line in enumerate(lines, 1):
+        if line.strip() == "<!-- workflow-governor:start -->":
+            in_managed_routing = True
+            continue
+        if line.strip() == "<!-- workflow-governor:end -->":
+            in_managed_routing = False
+            continue
         stripped = line.lstrip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
             in_fence = not in_fence
             continue
-        if not in_fence and RULE_LINE.match(line):
+        if not in_fence and not in_managed_routing and RULE_LINE.match(line):
             discovered.append(number)
     return discovered
 
@@ -89,14 +96,21 @@ def _validate_rule_coverage(repository: Path, rules: list[dict[str, Any]]) -> li
     return sorted(verified, key=lambda item: item["id"])
 
 
-def _validate_roles(repository: Path, roles: list[dict[str, str]]) -> list[dict[str, str]]:
+def _validate_roles(
+    repository: Path,
+    roles: list[dict[str, str]],
+    file_overrides: dict[str, bytes] | None = None,
+) -> list[dict[str, str]]:
     verified: list[dict[str, str]] = []
     for role in roles:
         path = _repository_path(repository, role["path"])
-        try:
-            payload = path.read_bytes()
-        except OSError as exc:
-            raise ContractError(role["path"], str(exc)) from exc
+        if file_overrides and role["path"] in file_overrides:
+            payload = file_overrides[role["path"]]
+        else:
+            try:
+                payload = path.read_bytes()
+            except OSError as exc:
+                raise ContractError(role["path"], str(exc)) from exc
         observed = digest_bytes(payload)
         if observed != role["digest"]:
             raise ContractError(
@@ -209,12 +223,17 @@ def _routes(source: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(routes, key=lambda item: item["node_id"])
 
 
-def compile_source(repository: Path, source_value: dict[str, Any]) -> dict[str, Any]:
+def compile_source(
+    repository: Path,
+    source_value: dict[str, Any],
+    *,
+    file_overrides: dict[str, bytes] | None = None,
+) -> dict[str, Any]:
     source = decode_source(source_value)
     _validate_bindings(source)
     _validate_graph(source)
     rules = _validate_rule_coverage(repository, source["instruction_rules"])
-    roles = _validate_roles(repository, source["role_refs"])
+    roles = _validate_roles(repository, source["role_refs"], file_overrides)
     bound = sum(1 for rule in rules if rule["bindings"])
     not_applicable = len(rules) - bound
     body: dict[str, Any] = {

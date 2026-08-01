@@ -1,0 +1,67 @@
+{
+  "description": "Workflow Governor guarded dispatch and completion enforcement.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/hook_runner.py",
+            "timeout": 10,
+            "statusMessage": "Starting Workflow Governor"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^Agent$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/hook_runner.py",
+            "timeout": 10,
+            "statusMessage": "Checking workflow dispatch permit"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/hook_runner.py",
+            "timeout": 10,
+            "statusMessage": "Binding workflow dispatch"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/hook_runner.py",
+            "timeout": 10,
+            "statusMessage": "Checking workflow result"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/hook_runner.py",
+            "timeout": 10,
+            "statusMessage": "Checking guarded workflow completion"
+          }
+        ]
+      }
+    ]
+  }
+}
