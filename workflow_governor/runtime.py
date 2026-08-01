@@ -333,8 +333,7 @@ class WorkflowRuntime:
         if not check["ok"]:
             raise ContractError("workflow", "; ".join(check["deterministic_errors"]))
         lock = _lock(root, workflow_id)
-        latest = self.ledger.latest_session(str(root)) if not session_id else None
-        resolved_session = session_id or (latest["session_id"] if latest else None)
+        resolved_session = session_id
         heartbeat_fresh = False
         if resolved_session:
             with self.ledger.connect() as connection:
@@ -349,6 +348,8 @@ class WorkflowRuntime:
         downgrade_reasons = []
         if requested_mode == "guarded" and not native_context_control:
             downgrade_reasons.append("native context-mode control was not confirmed")
+        if requested_mode == "guarded" and not resolved_session:
+            downgrade_reasons.append("the current hook session ID was not supplied")
         if requested_mode == "guarded" and not heartbeat_fresh:
             downgrade_reasons.append("no recent trusted hook heartbeat was found")
         starts = {node["id"]: 0 for node in lock["nodes"]}

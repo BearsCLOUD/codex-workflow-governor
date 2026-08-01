@@ -61,7 +61,10 @@ class HookRuntime:
         return {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": "Workflow Governor hooks are active. Guarded compliance still requires a verified lock and permit-bound dispatch.",
+                "additionalContext": (
+                    f"Workflow Governor hooks are active for session {session_id}. "
+                    "Pass this exact session ID to workflow_start_run. Guarded compliance still requires a verified lock and permit-bound dispatch."
+                ),
             }
         }
 
