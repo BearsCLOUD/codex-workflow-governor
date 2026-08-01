@@ -1,0 +1,36 @@
+{
+  "name": "codex-workflow-governor",
+  "version": "0.1.0",
+  "description": "Compile and govern explicit Codex workflow graphs",
+  "author": {
+    "name": "BearsCLOUD",
+    "url": "https://github.com/BearsCLOUD"
+  },
+  "homepage": "https://github.com/BearsCLOUD/codex-workflow-governor",
+  "repository": "https://github.com/BearsCLOUD/codex-workflow-governor",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "workflow",
+    "governance",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Workflow Governor",
+    "shortDescription": "Compile and govern explicit workflow graphs.",
+    "longDescription": "Create, validate, compile, visualize, and execute typed Codex workflows with a local event ledger and guarded dispatch permits.",
+    "developerName": "BearsCLOUD",
+    "category": "Development",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Create an explicit workflow for this repository.",
+      "Check the selected workflow and explain any drift.",
+      "Run a guarded workflow by its workflow ID."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}
