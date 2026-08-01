@@ -1,6 +1,6 @@
 {
   "name": "codex-workflow-governor",
-  "version": "0.1.0+codex.20260801193629",
+  "version": "0.1.0+codex.20260801193737",
   "description": "Compile and govern explicit Codex workflow graphs",
   "author": {
     "name": "BearsCLOUD",
