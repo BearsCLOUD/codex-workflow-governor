@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 — 2026-08-20
+
+### Fixed
+
+- Reconcile terminal `codex exec` turns after a bounded grace period instead of waiting for the outer task timeout when output is missing or invalid.
+- Persist distinct missing, malformed, and schema-invalid output reasons, attempt activity timestamps, retry decisions, and process-group cleanup evidence in run status and events.
+- Resume interrupted `running` supervisors from durable attempt state without duplicating retries, while terminating recorded orphan process groups safely.
+
 ## 0.5.0 — 2026-08-20
 
 ### Added

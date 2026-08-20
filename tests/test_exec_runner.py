@@ -4,8 +4,12 @@ import asyncio
 import io
 import json
 import os
+import signal
 import stat
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -22,6 +26,7 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -42,6 +47,16 @@ def classify(prompt: str) -> dict[str, object]:
         return {"kind": "failure"}
     if prompt.startswith("MALFORMED"):
         return {"kind": "malformed"}
+    for kind in (
+        "terminal-missing",
+        "terminal-malformed",
+        "terminal-schema-invalid",
+        "terminal-valid-grace",
+        "terminal-descendant",
+        "healthy-events",
+    ):
+        if prompt.startswith(kind.upper()):
+            return {"kind": kind}
     return {"kind": "generic"}
 
 
@@ -83,6 +98,20 @@ def update(event: str) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def record_child(pid: int) -> None:
+    with state_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0)
+        state = json.loads(handle.read())
+        state.setdefault("child_pids", []).append(pid)
+        handle.seek(0)
+        handle.truncate()
+        json.dump(state, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 update("start")
 try:
     if identity["kind"] == "fanout":
@@ -109,6 +138,27 @@ try:
         final_path = Path(option("--output-last-message"))
         final_path.parent.mkdir(parents=True, exist_ok=True)
         final_path.write_text("{this is not json", encoding="utf-8")
+        raise SystemExit(0)
+    elif identity["kind"] == "healthy-events":
+        for index in range(6):
+            print(json.dumps({"type": "item.updated", "index": index}), flush=True)
+            time.sleep(0.05)
+        output = {"ok": True}
+    elif str(identity["kind"]).startswith("terminal-"):
+        final_path = Path(option("--output-last-message"))
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        print(json.dumps({"type": "turn.completed"}), flush=True)
+        if identity["kind"] == "terminal-malformed":
+            final_path.write_text("{invalid", encoding="utf-8")
+        elif identity["kind"] == "terminal-schema-invalid":
+            final_path.write_text(json.dumps({"ok": "not-a-boolean"}), encoding="utf-8")
+        elif identity["kind"] == "terminal-valid-grace":
+            time.sleep(0.1)
+            final_path.write_text(json.dumps({"ok": True}), encoding="utf-8")
+        elif identity["kind"] == "terminal-descendant":
+            child = subprocess.Popen(["sleep", "60"])
+            record_child(child.pid)
+        time.sleep(60)
         raise SystemExit(0)
     else:
         output = {"ok": True}
@@ -148,6 +198,14 @@ SYNTHESIS_SCHEMA = {
     "required": ["indices", "values"],
     "additionalProperties": False,
 }
+
+
+def process_is_live(pid: int) -> bool:
+    try:
+        tail = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1]
+    except OSError:
+        return False
+    return tail.split()[0] != "Z"
 
 
 class ExecRunnerTestCase(unittest.TestCase):
@@ -480,6 +538,210 @@ class ExecutionTests(ExecRunnerTestCase):
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["tasks"]["work"]["status"], "cancelled")
         self.assertIn("finished_at", state)
+
+    def test_terminal_event_without_output_retries_once_and_kills_process_group(self) -> None:
+        workflow = self.write_workflow(
+            "terminal-retry",
+            [
+                {
+                    "id": "work",
+                    "depends_on": [],
+                    "prompt": "TERMINAL-DESCENDANT",
+                    "output_schema": "schemas/out.json",
+                    "retries": 1,
+                },
+                {
+                    "id": "after",
+                    "depends_on": ["work"],
+                    "prompt": "WORK",
+                    "output_schema": "schemas/out.json",
+                },
+            ],
+            {"out": OBJECT_SCHEMA},
+        )
+        with patch.dict(os.environ, {"CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS": "0.1"}):
+            code, _, stderr = self.invoke(
+                "run", str(workflow), "--codex-bin", str(self.fake_codex)
+            )
+
+        self.assertEqual(code, 1, stderr)
+        run_dir = self.only_run_dir()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        task = state["tasks"]["work"]
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(task["attempt"], 2)
+        self.assertEqual(task["failure_reason"], "terminal_event_output_missing")
+        self.assertEqual(task["reconciliation_reason"], "terminal_event_without_valid_output")
+        self.assertEqual(task["output_validation_state"], "missing")
+        self.assertEqual(task["next_action"], "fail_task")
+        self.assertIsNotNone(task["last_activity_at"])
+        self.assertIsNotNone(task["last_worker_heartbeat"])
+        self.assertIsNotNone(task["last_event_at"])
+        self.assertIsNotNone(task["terminal_event_at"])
+        self.assertIsNotNone(task["process_exit_at"])
+        self.assertEqual(state["tasks"]["after"]["status"], "blocked")
+        starts = self.fake_log()["starts"]
+        self.assertEqual([item["kind"] for item in starts], ["terminal-descendant"] * 2)
+        events = [
+            json.loads(line)
+            for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        reconciliations = [item for item in events if item["type"] == "attempt.reconciled"]
+        self.assertEqual(len(reconciliations), 2)
+        child_pids = self.fake_log().get("child_pids", [])
+        self.assertEqual(len(child_pids), 2)
+        for _ in range(20):
+            if not any(process_is_live(pid) for pid in child_pids):
+                break
+            time.sleep(0.05)
+        self.assertFalse(any(process_is_live(pid) for pid in child_pids))
+
+    def test_terminal_output_failures_have_distinct_stable_metadata(self) -> None:
+        modes = {
+            "missing": ("TERMINAL-MISSING", "terminal_event_output_missing", "missing"),
+            "malformed": (
+                "TERMINAL-MALFORMED",
+                "terminal_event_output_malformed",
+                "malformed",
+            ),
+            "schema": (
+                "TERMINAL-SCHEMA-INVALID",
+                "terminal_event_output_schema_invalid",
+                "schema-invalid",
+            ),
+        }
+        workflow = self.write_workflow(
+            "terminal-output-states",
+            [
+                {
+                    "id": task_id,
+                    "depends_on": [],
+                    "prompt": prompt,
+                    "output_schema": "schemas/out.json",
+                }
+                for task_id, (prompt, _, _) in modes.items()
+            ],
+            {"out": OBJECT_SCHEMA},
+        )
+        with patch.dict(os.environ, {"CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS": "0.1"}):
+            code, _, stderr = self.invoke(
+                "run", str(workflow), "--codex-bin", str(self.fake_codex)
+            )
+
+        self.assertEqual(code, 1, stderr)
+        state = json.loads((self.only_run_dir() / "run.json").read_text(encoding="utf-8"))
+        for task_id, (_, failure_reason, output_state) in modes.items():
+            with self.subTest(task=task_id):
+                task = state["tasks"][task_id]
+                self.assertEqual(task["failure_reason"], failure_reason)
+                self.assertEqual(task["output_validation_state"], output_state)
+
+    def test_valid_output_during_grace_and_healthy_events_complete(self) -> None:
+        workflow = self.write_workflow(
+            "terminal-success",
+            [
+                {
+                    "id": "grace",
+                    "depends_on": [],
+                    "prompt": "TERMINAL-VALID-GRACE",
+                    "output_schema": "schemas/out.json",
+                },
+                {
+                    "id": "healthy",
+                    "depends_on": [],
+                    "prompt": "HEALTHY-EVENTS",
+                    "output_schema": "schemas/out.json",
+                },
+            ],
+            {"out": OBJECT_SCHEMA},
+        )
+        with patch.dict(os.environ, {"CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS": "0.4"}):
+            code, _, stderr = self.invoke(
+                "run", str(workflow), "--codex-bin", str(self.fake_codex)
+            )
+
+        self.assertEqual(code, 0, stderr)
+        state = json.loads((self.only_run_dir() / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(
+            state["tasks"]["grace"]["reconciliation_reason"],
+            "terminal_event_with_valid_output",
+        )
+        self.assertEqual(state["tasks"]["grace"]["output_validation_state"], "valid")
+        self.assertIsNotNone(state["tasks"]["grace"]["output_valid_at"])
+        self.assertIsNotNone(state["tasks"]["grace"]["process_exit_at"])
+        self.assertIsNone(state["tasks"]["healthy"]["terminal_event_at"])
+        self.assertEqual(state["tasks"]["healthy"]["output_validation_state"], "valid")
+
+    def test_supervisor_restart_reconciles_running_attempt_without_duplicate_retry(self) -> None:
+        workflow = self.write_workflow(
+            "restart-reconciliation",
+            [
+                {
+                    "id": "work",
+                    "depends_on": [],
+                    "prompt": "TERMINAL-MISSING",
+                    "output_schema": "schemas/out.json",
+                    "retries": 1,
+                }
+            ],
+            {"out": OBJECT_SCHEMA},
+        )
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "skills" / "codex-workflows" / "scripts" / "codex_workflows.py"
+        )
+        environment = os.environ.copy()
+        environment["CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS"] = "0.4"
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                "--project-root",
+                str(self.project),
+                "run",
+                str(workflow),
+                "--codex-bin",
+                str(self.fake_codex),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+        )
+        run_dir: Path | None = None
+        for _ in range(100):
+            run_files = list(self.data.glob("exec-runs/*/*/run.json"))
+            if run_files:
+                candidate = run_files[0].parent
+                attempt_path = candidate / "tasks" / "work" / "attempt-1" / "attempt.json"
+                if attempt_path.is_file():
+                    attempt = json.loads(attempt_path.read_text(encoding="utf-8"))
+                    if attempt.get("terminal_event_at"):
+                        run_dir = candidate
+                        break
+            time.sleep(0.02)
+        self.assertIsNotNone(run_dir)
+        status_code, status_stdout, status_stderr = self.invoke(
+            "status", run_dir.name, "--json"
+        )
+        self.assertEqual(status_code, 0, status_stderr)
+        self.assertEqual(json.loads(status_stdout)["tasks"]["work"]["attempt"], 1)
+        with self.assertRaisesRegex(ContractError, "another worker already owns this run"):
+            asyncio.run(execute_run(run_dir))
+        os.kill(worker.pid, signal.SIGKILL)
+        worker.wait(timeout=5)
+
+        with patch.dict(os.environ, {"CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS": "0.4"}):
+            code, _, stderr = self.invoke("_worker", str(run_dir))
+
+        self.assertEqual(code, 1, stderr)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["restart_count"], 1)
+        self.assertEqual(state["tasks"]["work"]["attempt"], 2)
+        starts = self.fake_log()["starts"]
+        self.assertEqual([item["kind"] for item in starts], ["terminal-missing"] * 2)
 
 
 class WorkflowValidationTests(ExecRunnerTestCase):

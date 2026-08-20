@@ -1,6 +1,6 @@
 {
   "name": "codex-workflow-governor",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Govern native-Agent workflows and run reusable asynchronous codex exec graphs",
   "author": {
     "name": "BearsCLOUD",

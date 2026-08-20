@@ -45,6 +45,8 @@ Reusable workflow scopes are:
 
 Each task has a strict root-object JSON Schema. The runner invokes `codex exec --ephemeral --json --output-schema ... --output-last-message ...`, independently validates the saved final JSON, and preserves prompts, JSONL events, stderr, attempts, task results, and run state outside the target repository. Read-only workers run concurrently up to `max_parallel`; write-capable workers require an explicit run flag and are serialized project-wide, including across runs.
 
+The supervisor watches Codex JSONL events while the child is live. After `turn.completed`, `turn.failed`, or `turn.cancelled`, it allows a two-second output-flush grace period, then reconciles the terminal event, process group, exit state, and strict final output. Missing, malformed, and schema-invalid outputs receive distinct stable failure metadata; retries remain bounded by the task contract. A restarted worker resumes durable attempt state, cleans up recorded orphan process groups, and cannot consume the same retry twice. `CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS` may set a bounded `0.05`–`60` second grace for testing or host-specific flushing.
+
 `plan` discloses the workflow digest, sandbox, working directory, model settings, timeouts, retries, fan-out bounds, and conservative call count. The default budget is 5000 model calls; higher budgets and write-capable sandboxes require explicit command-line opt-ins. Persisted inputs and artifacts may contain sensitive data, so do not pass credentials or unnecessary personal information.
 
 The graph, readiness, dependency blocking, fan-out item order, and artifact layout are deterministic for fixed workflow files and inputs. Model text and semantics are not deterministic.

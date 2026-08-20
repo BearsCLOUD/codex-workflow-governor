@@ -21,7 +21,7 @@ import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
 try:
     from workflow_governor.contracts import ContractError, digest_json, validate_typed_values
@@ -80,6 +80,10 @@ MAX_FANOUT_ITEMS = 10_000
 MAX_TASKS = 256
 DEFAULT_MAX_CALLS = 5_000
 MAX_CALLS = 100_000
+DEFAULT_TERMINAL_GRACE_SECONDS = 2.0
+ATTEMPT_POLL_SECONDS = 0.05
+WORKER_HEARTBEAT_SECONDS = 1.0
+TERMINAL_EVENT_TYPES = {"turn.completed", "turn.failed", "turn.cancelled"}
 AGENT_FIELDS = {
     "name", "description", "developer_instructions", "model",
     "model_reasoning_effort", "sandbox_mode",
@@ -976,6 +980,177 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
         os.killpg(process.pid, signal.SIGKILL)
 
 
+def _precise_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _terminal_grace_seconds() -> float:
+    raw = os.environ.get("CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS")
+    if raw is None:
+        return DEFAULT_TERMINAL_GRACE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ContractError("terminal grace", "must be a number") from exc
+    if not 0.05 <= value <= 60:
+        raise ContractError("terminal grace", "must be from 0.05 to 60 seconds")
+    return value
+
+
+def _output_state(
+    final_path: Path,
+    schema: Mapping[str, Any],
+) -> tuple[str, Any | None, str | None]:
+    if not final_path.is_file():
+        return "missing", None, None
+    try:
+        result = _read_json(final_path)
+    except ContractError as exc:
+        return "malformed", None, str(exc)
+    try:
+        _validate_instance(result, schema)
+    except ContractError as exc:
+        return "schema-invalid", None, str(exc)
+    return "valid", result, None
+
+
+def _event_timestamp(event: Mapping[str, Any], events_path: Path) -> str:
+    for field in ("timestamp", "time", "created_at"):
+        value = event.get(field)
+        if isinstance(value, str) and value:
+            return value
+    try:
+        modified = events_path.stat().st_mtime
+    except OSError:
+        return _precise_utc_now()
+    return datetime.fromtimestamp(modified, timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _refresh_event_metadata(
+    events_path: Path,
+    metadata: dict[str, Any],
+    seen_lines: int,
+) -> tuple[int, bool]:
+    try:
+        text = events_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return seen_lines, False
+    lines = text.splitlines()
+    if text and not text.endswith(("\n", "\r")):
+        lines = lines[:-1]
+    changed = False
+    for line in lines[seen_lines:]:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        observed_at = _event_timestamp(event, events_path)
+        metadata["last_event_at"] = observed_at
+        event_type = event.get("type")
+        if event_type in TERMINAL_EVENT_TYPES and not metadata.get("terminal_event_at"):
+            metadata["terminal_event_at"] = observed_at
+            metadata["terminal_event_type"] = event_type
+        changed = True
+    return len(lines), changed
+
+
+def _process_start_identity(pid: int) -> str | None:
+    try:
+        tail = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1]
+        return tail.split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+async def _terminate_recorded_group(metadata: Mapping[str, Any]) -> bool:
+    process_group = metadata.get("process_group")
+    if not isinstance(process_group, int) or process_group <= 1 or process_group == os.getpgrp():
+        return False
+    pid = metadata.get("process_pid")
+    expected_identity = metadata.get("process_start_identity")
+    if isinstance(pid, int) and expected_identity:
+        current_identity = _process_start_identity(pid)
+        if current_identity is not None and current_identity != expected_identity:
+            return False
+    if not _process_group_exists(process_group):
+        return False
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process_group, signal.SIGTERM)
+    deadline = asyncio.get_running_loop().time() + 1.0
+    while _process_group_exists(process_group) and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(ATTEMPT_POLL_SECONDS)
+    if _process_group_exists(process_group):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process_group, signal.SIGKILL)
+    deadline = asyncio.get_running_loop().time() + 1.0
+    while _process_group_exists(process_group) and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(ATTEMPT_POLL_SECONDS)
+    return True
+
+
+async def _persist_attempt(
+    attempt_path: Path,
+    metadata: dict[str, Any],
+    progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None,
+) -> None:
+    _atomic_json(attempt_path, metadata)
+    if progress is not None:
+        await progress(dict(metadata))
+
+
+def _failure_code(prefix: str, output_validation_state: str) -> str:
+    suffix = output_validation_state.replace("-", "_")
+    return f"{prefix}_{suffix}"
+
+
+def _elapsed_since(timestamp: str | None) -> float:
+    if not timestamp:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+
+
+def _attempt_status_fields(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    fields = {
+        "attempt": metadata.get("attempt"),
+        "attempt_status": metadata.get("status"),
+        "last_worker_heartbeat": metadata.get("last_worker_heartbeat"),
+        "last_event_at": metadata.get("last_event_at"),
+        "terminal_event_at": metadata.get("terminal_event_at"),
+        "terminal_event_type": metadata.get("terminal_event_type"),
+        "process_exit_at": metadata.get("process_exit_at"),
+        "output_valid_at": metadata.get("output_valid_at"),
+        "output_validation_state": metadata.get("output_validation_state"),
+        "reconciliation_reason": metadata.get("reconciliation_reason"),
+        "failure_reason": metadata.get("failure_reason"),
+        "next_action": metadata.get("next_action"),
+    }
+    activity = [
+        value
+        for value in (fields["last_worker_heartbeat"], fields["last_event_at"])
+        if isinstance(value, str)
+    ]
+    fields["last_activity_at"] = max(activity) if activity else None
+    return fields
+
+
 async def _acquire_file_lock(path: Path, cancel_event: asyncio.Event) -> int | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1006,17 +1181,131 @@ async def _run_one(
     write_lock: asyncio.Lock,
     write_lock_path: Path,
     cancel_event: asyncio.Event,
+    terminal_grace_seconds: float,
+    progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None,
+    event: Callable[[str, Mapping[str, Any]], Awaitable[None]] | None = None,
 ) -> tuple[bool, Any | None, str | None]:
     task_dir.mkdir(parents=True, exist_ok=True)
     _atomic_text(task_dir / "prompt.txt", prompt)
     last_error = "unknown failure"
-    for attempt in range(1, task["retries"] + 2):
+    last_failure_reason = "unknown_failure"
+    max_attempts = task["retries"] + 1
+    for attempt in range(1, max_attempts + 1):
         if cancel_event.is_set():
             return False, None, "cancelled"
         attempt_dir = task_dir / f"attempt-{attempt}"
         attempt_dir.mkdir(parents=True, exist_ok=True)
         schema_path = Path(task["_schema_path"])
         final_path = attempt_dir / "final.json"
+        attempt_path = attempt_dir / "attempt.json"
+        events_path = attempt_dir / "codex-events.jsonl"
+        stderr_path = attempt_dir / "stderr.log"
+        has_retry = attempt < max_attempts
+
+        if attempt_path.is_file():
+            existing = _read_json(attempt_path)
+            if not isinstance(existing, dict):
+                raise ContractError(str(attempt_path), "must contain an object")
+            existing_status = existing.get("status")
+            output_validation_state, existing_result, output_error = _output_state(
+                final_path, task["_schema"]
+            )
+            if existing_status == "completed" and output_validation_state == "valid":
+                shutil.copy2(final_path, task_dir / "final.json")
+                return True, existing_result, None
+            if existing_status in {"failed", "cancelled"}:
+                last_failure_reason = str(
+                    existing.get("failure_reason") or last_failure_reason
+                )
+                last_error = str(existing.get("error") or last_failure_reason)
+                continue
+            if existing_status != "running":
+                raise ContractError(str(attempt_path), f"unknown attempt status {existing_status!r}")
+
+            metadata = dict(existing)
+            _, events_changed = _refresh_event_metadata(events_path, metadata, 0)
+            if events_changed:
+                await _persist_attempt(attempt_path, metadata, progress)
+            terminal_observed = bool(metadata.get("terminal_event_at"))
+            if terminal_observed:
+                remaining = max(
+                    0.0,
+                    terminal_grace_seconds - _elapsed_since(str(metadata["terminal_event_at"])),
+                )
+                deadline = asyncio.get_running_loop().time() + remaining
+                while asyncio.get_running_loop().time() < deadline:
+                    output_validation_state, existing_result, output_error = _output_state(
+                        final_path, task["_schema"]
+                    )
+                    if output_validation_state == "valid":
+                        break
+                    metadata["last_worker_heartbeat"] = _precise_utc_now()
+                    metadata["output_validation_state"] = output_validation_state
+                    await _persist_attempt(attempt_path, metadata, progress)
+                    await asyncio.sleep(ATTEMPT_POLL_SECONDS)
+            killed = await _terminate_recorded_group(metadata)
+            metadata["process_exit_at"] = metadata.get("process_exit_at") or _precise_utc_now()
+            metadata["orphan_process_group_terminated"] = killed
+            output_validation_state, existing_result, output_error = _output_state(
+                final_path, task["_schema"]
+            )
+            metadata["output_validation_state"] = output_validation_state
+            if output_validation_state == "valid" and terminal_observed:
+                metadata.update(
+                    {
+                        "status": "completed",
+                        "output_valid_at": _precise_utc_now(),
+                        "next_action": "complete_task",
+                        "finished_at": _precise_utc_now(),
+                    }
+                )
+                await _persist_attempt(attempt_path, metadata, progress)
+                shutil.copy2(final_path, task_dir / "final.json")
+                _atomic_json(
+                    task_dir / "state.json",
+                    {"status": "completed", "attempt": attempt, "finished_at": utc_now()},
+                )
+                if event is not None:
+                    await event(
+                        "attempt.reconciled",
+                        {"attempt": attempt, "reason": "terminal_event_with_valid_output", "next_action": "complete_task"},
+                    )
+                return True, existing_result, None
+            reconciliation_reason = (
+                "terminal_event_without_valid_output"
+                if terminal_observed
+                else "supervisor_restart_orphaned_process"
+            )
+            failure_reason = (
+                _failure_code("terminal_event_output", output_validation_state)
+                if terminal_observed
+                else "supervisor_restart_orphaned_process"
+            )
+            metadata.update(
+                {
+                    "status": "failed",
+                    "reconciliation_reason": reconciliation_reason,
+                    "failure_reason": failure_reason,
+                    "output_error": output_error,
+                    "next_action": "retry" if has_retry else "fail_task",
+                    "finished_at": _precise_utc_now(),
+                }
+            )
+            await _persist_attempt(attempt_path, metadata, progress)
+            if event is not None:
+                await event(
+                    "attempt.reconciled",
+                    {
+                        "attempt": attempt,
+                        "reason": reconciliation_reason,
+                        "failure_reason": failure_reason,
+                        "next_action": metadata["next_action"],
+                    },
+                )
+            last_failure_reason = failure_reason
+            last_error = output_error or failure_reason
+            continue
+
         command = [
             codex_bin,
             "exec",
@@ -1047,10 +1336,22 @@ async def _run_one(
         if not cwd.is_dir() or (cwd != project and project not in cwd.parents):
             return False, None, f"cwd escapes project or is missing: {cwd}"
         command.extend(["--cd", str(cwd), "-"])
-        events_path = attempt_dir / "codex-events.jsonl"
-        stderr_path = attempt_dir / "stderr.log"
         process: asyncio.subprocess.Process | None = None
         write_descriptor: int | None = None
+        metadata: dict[str, Any] = {
+            "status": "running",
+            "attempt": attempt,
+            "started_at": _precise_utc_now(),
+            "last_worker_heartbeat": _precise_utc_now(),
+            "last_event_at": None,
+            "terminal_event_at": None,
+            "process_exit_at": None,
+            "output_valid_at": None,
+            "output_validation_state": "missing",
+            "reconciliation_reason": None,
+            "failure_reason": None,
+            "next_action": "running",
+        }
         try:
             async with semaphore:
                 if cancel_event.is_set():
@@ -1072,52 +1373,181 @@ async def _run_one(
                             stderr=errors,
                             start_new_session=True,
                         )
-                        communicate = asyncio.create_task(process.communicate(prompt.encode("utf-8")))
-                        cancelled = asyncio.create_task(cancel_event.wait())
-                        done, _ = await asyncio.wait(
-                            {communicate, cancelled},
-                            timeout=task["timeout_seconds"],
-                            return_when=asyncio.FIRST_COMPLETED,
+                        metadata.update(
+                            {
+                                "process_pid": process.pid,
+                                "process_group": process.pid,
+                                "process_start_identity": _process_start_identity(process.pid),
+                            }
                         )
-                        if not done:
-                            last_error = f"timed out after {task['timeout_seconds']} seconds"
-                            await _terminate(process)
-                            communicate.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await communicate
-                            cancelled.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await cancelled
-                        elif cancelled in done and cancel_event.is_set():
-                            await _terminate(process)
-                            communicate.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await communicate
-                            _atomic_json(
-                                attempt_dir / "attempt.json",
-                                {"status": "cancelled", "error": "cancelled", "finished_at": utc_now()},
+                        await _persist_attempt(attempt_path, metadata, progress)
+                        communicate = asyncio.create_task(process.communicate(prompt.encode("utf-8")))
+                        hard_deadline = asyncio.get_running_loop().time() + task["timeout_seconds"]
+                        terminal_deadline: float | None = None
+                        seen_event_lines = 0
+                        last_persisted = asyncio.get_running_loop().time()
+                        while True:
+                            now = asyncio.get_running_loop().time()
+                            if cancel_event.is_set():
+                                await _terminate(process)
+                                if not communicate.done():
+                                    communicate.cancel()
+                                with contextlib.suppress(asyncio.CancelledError, OSError):
+                                    await communicate
+                                metadata.update(
+                                    {
+                                        "status": "cancelled",
+                                        "failure_reason": "cancelled",
+                                        "next_action": "cancel_task",
+                                        "process_exit_at": _precise_utc_now(),
+                                        "finished_at": _precise_utc_now(),
+                                    }
+                                )
+                                await _persist_attempt(attempt_path, metadata, progress)
+                                return False, None, "cancelled"
+
+                            seen_event_lines, events_changed = _refresh_event_metadata(
+                                events_path, metadata, seen_event_lines
                             )
-                            return False, None, "cancelled"
-                        else:
-                            cancelled.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await cancelled
-                            await communicate
-                            await _terminate(process)
-                            if process.returncode != 0:
-                                last_error = f"codex exec exited with {process.returncode}"
-                            elif not final_path.is_file():
-                                last_error = "codex exec did not write a final response"
-                            else:
-                                result = _read_json(final_path)
-                                _validate_instance(result, task["_schema"])
+                            if metadata.get("terminal_event_at") and terminal_deadline is None:
+                                terminal_deadline = now + terminal_grace_seconds
+                            output_validation_state, result, output_error = _output_state(
+                                final_path, task["_schema"]
+                            )
+                            metadata["output_validation_state"] = output_validation_state
+
+                            if terminal_deadline is not None and output_validation_state == "valid":
+                                await _terminate(process)
+                                if not communicate.done():
+                                    communicate.cancel()
+                                with contextlib.suppress(asyncio.CancelledError, OSError):
+                                    await communicate
+                                metadata.update(
+                                    {
+                                        "status": "completed",
+                                        "process_exit_at": _precise_utc_now(),
+                                        "output_valid_at": _precise_utc_now(),
+                                        "reconciliation_reason": "terminal_event_with_valid_output",
+                                        "next_action": "complete_task",
+                                        "finished_at": _precise_utc_now(),
+                                    }
+                                )
+                                await _persist_attempt(attempt_path, metadata, progress)
                                 shutil.copy2(final_path, task_dir / "final.json")
                                 _atomic_json(
-                                    attempt_dir / "attempt.json",
-                                    {"status": "completed", "finished_at": utc_now()},
+                                    task_dir / "state.json",
+                                    {"status": "completed", "attempt": attempt, "finished_at": utc_now()},
                                 )
-                                _atomic_json(task_dir / "state.json", {"status": "completed", "attempt": attempt, "finished_at": utc_now()})
+                                if event is not None:
+                                    await event(
+                                        "attempt.reconciled",
+                                        {"attempt": attempt, "reason": "terminal_event_with_valid_output", "next_action": "complete_task"},
+                                    )
                                 return True, result, None
+
+                            if communicate.done():
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await communicate
+                                metadata["process_exit_at"] = _precise_utc_now()
+                                await _terminate(process)
+                                output_validation_state, result, output_error = _output_state(
+                                    final_path, task["_schema"]
+                                )
+                                metadata["output_validation_state"] = output_validation_state
+                                if process.returncode == 0 and output_validation_state == "valid":
+                                    metadata.update(
+                                        {
+                                            "status": "completed",
+                                            "output_valid_at": _precise_utc_now(),
+                                            "next_action": "complete_task",
+                                            "finished_at": _precise_utc_now(),
+                                        }
+                                    )
+                                    await _persist_attempt(attempt_path, metadata, progress)
+                                    shutil.copy2(final_path, task_dir / "final.json")
+                                    _atomic_json(
+                                        task_dir / "state.json",
+                                        {"status": "completed", "attempt": attempt, "finished_at": utc_now()},
+                                    )
+                                    return True, result, None
+                                if process.returncode != 0:
+                                    failure_reason = "process_exit_nonzero"
+                                    last_error = f"codex exec exited with {process.returncode}"
+                                else:
+                                    failure_reason = _failure_code(
+                                        "process_exit_output", output_validation_state
+                                    )
+                                    last_error = output_error or (
+                                        "codex exec did not write a final response"
+                                        if output_validation_state == "missing"
+                                        else failure_reason
+                                    )
+                                metadata.update(
+                                    {
+                                        "status": "failed",
+                                        "failure_reason": failure_reason,
+                                        "output_error": output_error,
+                                        "reconciliation_reason": "process_exit_without_valid_output",
+                                        "next_action": "retry" if has_retry else "fail_task",
+                                        "finished_at": _precise_utc_now(),
+                                    }
+                                )
+                                last_failure_reason = failure_reason
+                                break
+
+                            if terminal_deadline is not None and now >= terminal_deadline:
+                                await _terminate(process)
+                                if not communicate.done():
+                                    communicate.cancel()
+                                with contextlib.suppress(asyncio.CancelledError, OSError):
+                                    await communicate
+                                metadata["process_exit_at"] = _precise_utc_now()
+                                output_validation_state, _, output_error = _output_state(
+                                    final_path, task["_schema"]
+                                )
+                                failure_reason = _failure_code(
+                                    "terminal_event_output", output_validation_state
+                                )
+                                metadata.update(
+                                    {
+                                        "status": "failed",
+                                        "failure_reason": failure_reason,
+                                        "output_error": output_error,
+                                        "output_validation_state": output_validation_state,
+                                        "reconciliation_reason": "terminal_event_without_valid_output",
+                                        "next_action": "retry" if has_retry else "fail_task",
+                                        "finished_at": _precise_utc_now(),
+                                    }
+                                )
+                                last_failure_reason = failure_reason
+                                last_error = output_error or failure_reason
+                                break
+
+                            if now >= hard_deadline:
+                                await _terminate(process)
+                                if not communicate.done():
+                                    communicate.cancel()
+                                with contextlib.suppress(asyncio.CancelledError, OSError):
+                                    await communicate
+                                metadata.update(
+                                    {
+                                        "status": "failed",
+                                        "failure_reason": "attempt_timeout",
+                                        "reconciliation_reason": "deadline_exceeded",
+                                        "next_action": "retry" if has_retry else "fail_task",
+                                        "process_exit_at": _precise_utc_now(),
+                                        "finished_at": _precise_utc_now(),
+                                    }
+                                )
+                                last_failure_reason = "attempt_timeout"
+                                last_error = f"timed out after {task['timeout_seconds']} seconds"
+                                break
+
+                            if events_changed or now - last_persisted >= WORKER_HEARTBEAT_SECONDS:
+                                metadata["last_worker_heartbeat"] = _precise_utc_now()
+                                await _persist_attempt(attempt_path, metadata, progress)
+                                last_persisted = now
+                            await asyncio.sleep(ATTEMPT_POLL_SECONDS)
                 finally:
                     if write_descriptor is not None:
                         with contextlib.suppress(OSError):
@@ -1131,8 +1561,36 @@ async def _run_one(
             raise
         except (OSError, ContractError) as exc:
             last_error = str(exc)
-        _atomic_json(attempt_dir / "attempt.json", {"status": "failed", "error": last_error, "finished_at": utc_now()})
-    _atomic_json(task_dir / "state.json", {"status": "failed", "error": last_error, "finished_at": utc_now()})
+            last_failure_reason = "supervisor_error"
+            metadata.update(
+                {
+                    "status": "failed",
+                    "failure_reason": "supervisor_error",
+                    "error": last_error,
+                    "next_action": "retry" if has_retry else "fail_task",
+                    "finished_at": _precise_utc_now(),
+                }
+            )
+        await _persist_attempt(attempt_path, metadata, progress)
+        if event is not None:
+            await event(
+                "attempt.reconciled",
+                {
+                    "attempt": attempt,
+                    "reason": metadata.get("reconciliation_reason"),
+                    "failure_reason": metadata.get("failure_reason"),
+                    "next_action": metadata.get("next_action"),
+                },
+            )
+    _atomic_json(
+        task_dir / "state.json",
+        {
+            "status": "failed",
+            "error": last_error,
+            "failure_reason": last_failure_reason,
+            "finished_at": utc_now(),
+        },
+    )
     return False, None, last_error
 
 
@@ -1145,6 +1603,9 @@ async def _execute_run(run_dir: Path) -> int:
         raise ContractError("run.workflow_digest", "snapshot no longer matches queued run authority")
     inputs = state["inputs"]
     codex_bin = state["codex_bin"]
+    terminal_grace_seconds = float(
+        state.get("terminal_grace_seconds", DEFAULT_TERMINAL_GRACE_SECONDS)
+    )
     semaphore = asyncio.Semaphore(state["max_parallel"])
     write_lock = asyncio.Lock()
     write_lock_path = _runs_root(project) / ".workspace-write.lock"
@@ -1155,14 +1616,34 @@ async def _execute_run(run_dir: Path) -> int:
     done_events = {task_id: asyncio.Event() for task_id in workflow["tasks"]}
 
     async def watch_cancel() -> None:
+        last_heartbeat = 0.0
         while not cancel_event.is_set():
             if (run_dir / "cancel.requested").exists():
                 cancel_event.set()
                 return
+            now = asyncio.get_running_loop().time()
+            if now - last_heartbeat >= WORKER_HEARTBEAT_SECONDS:
+                await store.update(
+                    lambda current: current.update(
+                        {"last_worker_heartbeat": _precise_utc_now()}
+                    )
+                )
+                last_heartbeat = now
             await asyncio.sleep(0.25)
 
     async def run_task_inner(task_id: str) -> None:
         task = workflow["tasks"][task_id]
+        current_status = store.state["tasks"][task_id]["status"]
+        if current_status == "completed":
+            completed_path = run_dir / "tasks" / task_id / "final.json"
+            if not completed_path.is_file():
+                raise ContractError(
+                    f"run.tasks.{task_id}", "completed task is missing final.json"
+                )
+            outputs[task_id] = _read_json(completed_path)
+            return
+        if current_status in {"failed", "blocked", "cancelled"}:
+            return
         for dependency in task["depends_on"]:
             await done_events[dependency].wait()
         dependency_statuses = [store.state["tasks"][dependency]["status"] for dependency in task["depends_on"]]
@@ -1216,6 +1697,24 @@ async def _execute_run(run_dir: Path) -> int:
                 prompt = _render_prompt(task["prompt"], inputs, outputs, local)
                 item_dir = task_root / "items" / f"{index:06d}"
                 _atomic_json(item_dir / "input.json", {task["item_name"]: item, "index": index})
+
+                async def item_progress(metadata: Mapping[str, Any]) -> None:
+                    fields = _attempt_status_fields(metadata)
+
+                    def update(current: dict[str, Any]) -> None:
+                        current_task = current["tasks"][task_id]
+                        current_task.update(fields)
+                        current_task["item_index"] = index
+                        current_task.setdefault("item_attempts", {})[str(index)] = fields
+
+                    await store.update(update)
+
+                async def item_event(event_type: str, payload: Mapping[str, Any]) -> None:
+                    await store.event(
+                        event_type,
+                        {"task_id": task_id, "item_index": index, **payload},
+                    )
+
                 result = await _run_one(
                     task,
                     item_dir,
@@ -1226,6 +1725,9 @@ async def _execute_run(run_dir: Path) -> int:
                     write_lock,
                     write_lock_path,
                     cancel_event,
+                    terminal_grace_seconds,
+                    item_progress,
+                    item_event,
                 )
                 def count(current: dict[str, Any]) -> None:
                     current_task = current["tasks"][task_id]
@@ -1259,6 +1761,16 @@ async def _execute_run(run_dir: Path) -> int:
                 await store.update(lambda current: current["tasks"][task_id].update({"status": "completed", "finished_at": utc_now()}))
         else:
             prompt = _render_prompt(task["prompt"], inputs, outputs, {})
+
+            async def task_progress(metadata: Mapping[str, Any]) -> None:
+                fields = _attempt_status_fields(metadata)
+                await store.update(
+                    lambda current: current["tasks"][task_id].update(fields)
+                )
+
+            async def task_event(event_type: str, payload: Mapping[str, Any]) -> None:
+                await store.event(event_type, {"task_id": task_id, **payload})
+
             ok, output, error = await _run_one(
                 task,
                 task_root,
@@ -1269,6 +1781,9 @@ async def _execute_run(run_dir: Path) -> int:
                 write_lock,
                 write_lock_path,
                 cancel_event,
+                terminal_grace_seconds,
+                task_progress,
+                task_event,
             )
             if ok:
                 outputs[task_id] = output
@@ -1300,7 +1815,19 @@ async def _execute_run(run_dir: Path) -> int:
             finally:
                 done_events[task_id].set()
 
-    await store.update(lambda current: current.update({"status": "running", "started_at": utc_now(), "worker_pid": os.getpid()}))
+    was_running = state.get("status") == "running"
+
+    def mark_running(current: dict[str, Any]) -> None:
+        current["status"] = "running"
+        current.setdefault("started_at", utc_now())
+        current["worker_pid"] = os.getpid()
+        current["last_worker_heartbeat"] = _precise_utc_now()
+        if was_running:
+            current["restart_count"] = int(current.get("restart_count", 0)) + 1
+
+    await store.update(mark_running)
+    if was_running:
+        await store.event("run.resumed", {"restart_count": store.state.get("restart_count", 1)})
     watcher = asyncio.create_task(watch_cancel())
     try:
         await asyncio.gather(*(run_task(task_id) for task_id in workflow["order"]))
@@ -1334,8 +1861,11 @@ async def execute_run(run_dir: Path) -> int:
             raise ContractError("run", "another worker already owns this run") from exc
         try:
             state = _read_json(run_dir / "run.json")
-            if state.get("status") != "queued":
-                raise ContractError("run.status", f"must be queued, found {state.get('status')!r}")
+            if state.get("status") not in {"queued", "running"}:
+                raise ContractError(
+                    "run.status",
+                    f"must be queued or running, found {state.get('status')!r}",
+                )
             return await _execute_run(run_dir)
         except BaseException as exc:
             with contextlib.suppress(Exception):
@@ -1379,6 +1909,7 @@ async def execute_run(run_dir: Path) -> int:
 def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
     scope, source = resolve_workflow(args.workflow, project)
     inputs = _parse_input_values(args.inputs, args.input)
+    terminal_grace_seconds = _terminal_grace_seconds()
     run_id = f"exec_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{os.urandom(4).hex()}"
     run_dir = _runs_root(project) / run_id
     run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -1424,6 +1955,7 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
         "max_parallel": args.max_parallel or workflow["max_parallel"],
         "max_calls": args.max_calls,
         "planned_calls": planned_calls,
+        "terminal_grace_seconds": terminal_grace_seconds,
         "plan": planned_tasks,
         "status": "queued",
         "created_at": utc_now(),

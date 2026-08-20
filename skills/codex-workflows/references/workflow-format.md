@@ -186,6 +186,12 @@ Runs are stored below `PLUGIN_DATA` when set, otherwise below `~/.codex/workflow
 
 `run.json` also records every resolved agent pin. The workflow digest covers `workflow.json`, referenced schemas, and agent snapshot bytes. Agent drift is checked again from the run snapshot before workers start.
 
+### Terminal attempt reconciliation
+
+The supervisor records `last_worker_heartbeat`, `last_event_at`, `terminal_event_at`, `process_exit_at`, `output_valid_at`, `output_validation_state`, `failure_reason`, `reconciliation_reason`, `attempt`, and `next_action` in task status. Terminal turn events start a bounded two-second grace period for output flushing. A valid strict output written during that period completes normally; otherwise the full recorded process group is terminated and the attempt becomes a distinct missing, malformed, or schema-invalid failure before bounded retry handling continues.
+
+If a supervisor process stops while `run.json` is still `running`, a new worker may resume under the same exclusive `worker.lock`. It reconstructs completed outputs, reconciles a durable running attempt, terminates a recorded orphan group, and advances only to the next unconsumed attempt. Each decision is appended as `attempt.reconciled` in `events.jsonl`. Set `CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS` to a value from `0.05` to `60` only when a host or test fixture needs a non-default grace.
+
 Use the same exact `--project-root` for `run`, `status`, `wait`, `result`, and `cancel`, because run lookup is project-scoped. Use these commands rather than depending on storage internals. `wait` exit `2` means its monitoring timeout elapsed and requires another status check. Use artifacts for diagnosis and audit; do not edit them to change run truth.
 
 Run directories and files are created with private user permissions, but their contents remain sensitive local data. Do not put API keys, credentials, or unnecessary personal data in inputs or prompts because snapshots, rendered prompts, stderr, events, and outputs are intentionally retained.
