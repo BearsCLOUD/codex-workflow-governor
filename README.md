@@ -26,6 +26,8 @@ The plugin exposes `workflow-create`, `workflow-check`, `workflow-analyze`, `wor
 
 It also exposes `adaptive-deepening` and `graph-completion` as methodology skills for evidence-wave enrichment and knowledge-graph gap completion.
 
+A Governor workflow graph coordinates execution. A task-owned knowledge graph stores domain entities and facts; `graph-completion` never treats those two graph types as the same state.
+
 Every skill disables implicit invocation. Drafting and updating never modify the target repository; only `workflow-apply` materializes a draft.
 
 The plugin never runs Git commands and never creates Git policy. Agents continue to follow the applicable repository instructions.
