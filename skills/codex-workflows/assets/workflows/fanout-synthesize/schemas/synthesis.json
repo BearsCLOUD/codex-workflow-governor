@@ -1,0 +1,46 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "success",
+        "partial",
+        "blocked"
+      ]
+    },
+    "answer": {
+      "type": "string"
+    },
+    "key_findings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_items": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "status",
+    "answer",
+    "key_findings",
+    "conflicts",
+    "unresolved",
+    "source_items"
+  ],
+  "additionalProperties": false
+}
