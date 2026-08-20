@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/score-documentation-quality/review.schema.json",
+  "title": "Evidence-backed documentation review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scope", "criteria", "systemic_findings", "strengths", "recommendations", "limitations"],
+  "properties": {
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["purpose", "version", "complete", "digest", "units", "excluded"],
+      "properties": {
+        "purpose": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "complete": {"const": true},
+        "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "units": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "content_sha256", "role", "profile"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+              "role": {"enum": ["authority", "core", "supporting"]},
+              "profile": {"enum": ["instruction", "runbook", "specification", "guide", "reference"]}
+            }
+          }
+        },
+        "excluded": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "criteria": {
+      "type": "object",
+      "minProperties": 32,
+      "maxProperties": 32,
+      "propertyNames": {
+        "enum": [
+          "purpose_scope", "audience_applicability", "owner_source", "precedence_boundaries",
+          "primary_source_alignment", "examples_commands_verified", "assumptions_uncertainty", "freshness_revision",
+          "main_path", "preconditions_inputs", "edges_errors", "verification_recovery",
+          "internal_consistency", "cross_document_consistency", "entity_terminology_consistency", "schema_example_consistency",
+          "ordered_actions", "decision_branches", "observable_results", "safe_stop_escalation",
+          "identity_hierarchy", "navigation", "links_anchors", "task_findability",
+          "single_owner", "duplication_control", "lifecycle_change", "portability",
+          "clarity", "normative_language", "format_accessibility", "audience_terms"
+        ]
+      },
+      "additionalProperties": {"$ref": "#/$defs/criterion"}
+    },
+    "systemic_findings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/systemicFinding"}
+    },
+    "strengths": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "minLength": 1}},
+    "recommendations": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "minLength": 1}},
+    "limitations": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "locator", "note"],
+      "properties": {
+        "kind": {"enum": ["supports", "gap", "conflict", "unavailable"]},
+        "path": {"type": "string", "minLength": 1},
+        "locator": {"type": "string", "minLength": 1},
+        "note": {"type": "string", "minLength": 1}
+      }
+    },
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "rationale", "evidence"],
+      "properties": {
+        "status": {"enum": ["met", "partial", "unmet", "unknown"]},
+        "rationale": {"type": "string", "minLength": 1},
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}}
+      }
+    },
+    "systemicFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "root_cause", "summary", "evidence"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"},
+        "type": {"enum": ["critical_authority_conflict", "operational_contradiction", "missing_core_authority", "broken_core_path", "material_ambiguity", "material_primary_source_mismatch"]},
+        "root_cause": {"type": "string", "minLength": 1},
+        "summary": {"type": "string", "minLength": 1},
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}}
+      }
+    }
+  }
+}

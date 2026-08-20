@@ -1,0 +1,14 @@
+interface:
+  display_name: Оценка и улучшение документации
+  short_description: Быстрая правка или доказательный аудит
+  default_prompt: 'Используй $score-documentation-quality и выбери минимально достаточный
+    режим: быструю правку, формальную оценку или глубокую миграцию.'
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true
