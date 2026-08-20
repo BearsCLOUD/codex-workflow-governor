@@ -122,7 +122,7 @@ Use the task's existing graph store for facts. Create a Governor workflow only w
 
 `target query -> gap detection -> method planning -> candidate worker fan-out -> validation -> independent critique -> owner commit -> diagnostics and target-query rerun -> stop gate`
 
-Use the explicit `workflow-create` or `workflow-update` skills to encode that execution graph, `workflow-check` and `workflow-analyze` to validate it, `workflow-apply` to materialize it, and `workflow-run` to execute it.
+Use `$codex-workflows` to compile a bounded one-off run from the target query or to create, validate, plan, and execute a reusable project workflow.
 
 Workers return candidate packets and never promote facts. One owner writes accepted facts, preserves conflict history, and decides whether another wave is justified.
 

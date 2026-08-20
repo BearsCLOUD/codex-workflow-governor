@@ -1,7 +1,7 @@
 {
   "name": "codex-workflow-governor",
-  "version": "0.7.0",
-  "description": "Govern native-Agent workflows and run reusable asynchronous or persistent codex exec graphs",
+  "version": "0.8.0",
+  "description": "Run reusable asynchronous, adaptive, or persistent codex exec graphs",
   "author": {
     "name": "BearsCLOUD",
     "url": "https://github.com/BearsCLOUD"
@@ -15,15 +15,14 @@
     "async",
     "structured-output",
     "governance",
-    "mcp",
     "documentation",
     "instructions"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Workflow Governor",
-    "shortDescription": "Govern agents and run async Codex task graphs.",
-    "longDescription": "Create and govern compiled native-Agent workflows or run reusable asynchronous and explicitly persistent codex exec graphs with bounded concurrency, dependencies, strict outputs, checkpoints, monitoring, and persisted results.",
+    "shortDescription": "Run reusable async Codex task graphs.",
+    "longDescription": "Run reusable asynchronous, prompt-compiled adaptive, and explicitly persistent codex exec graphs with bounded concurrency, dependencies, strict outputs, checkpoints, monitoring, and persisted results.",
     "developerName": "BearsCLOUD",
     "category": "Development",
     "capabilities": [
@@ -31,9 +30,6 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Create an explicit workflow for this repository.",
-      "Check the selected workflow and explain any drift.",
-      "Run a guarded workflow by its workflow ID.",
       "Analyze many independent items asynchronously and synthesize a structured result.",
       "Run a bounded persistent monitor until it is explicitly paused or cancelled.",
       "Compile and run a bounded adaptive workflow from one research prompt.",

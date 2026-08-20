@@ -8,9 +8,8 @@ Start with the least durable mechanism that satisfies the task:
 | --- | --- |
 | One independent task | Direct `codex exec` |
 | Many independent items, dependent synthesis, detached execution, or repeat use | This asynchronous codex-exec workflow backend |
-| Governed native Agent dispatch with compiled locks, hooks, permits, and MCP lifecycle | Existing Workflow Governor lifecycle skills |
 
-Do not maintain the same process in both backends. If governance is the requirement, use the native lifecycle. If high-volume async exec and saved structured results are the requirement, use this backend.
+Use this backend when the task needs high-volume asynchronous execution, reusable graphs, or saved structured results.
 
 ## List before create
 

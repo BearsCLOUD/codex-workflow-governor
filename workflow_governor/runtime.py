@@ -14,7 +14,6 @@ from typing import Any
 from .compiler import compile_source, render_mermaid, render_workflow, verify_generated_views
 from .contracts import (
     DISPATCH_SCHEMA,
-    RESULT_SCHEMA,
     ContractError,
     decode_dispatch,
     decode_lock,
@@ -35,7 +34,7 @@ MANAGED_END = "<!-- workflow-governor:end -->"
 MANAGED_ROUTING = """<!-- workflow-governor:start -->
 ## Workflow Governor Routing
 
-- Use the `workflow-run` skill with an explicit workflow ID for governed execution.
+- Use an explicit workflow ID for governed execution.
 - Treat a workflow lock as runtime authority only when every recorded digest verifies.
 - Treat a guarded run as compliant only when its status is `completed`.
 - Follow applicable Git instructions without creating plugin-owned Git policy.

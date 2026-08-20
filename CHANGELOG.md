@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0 — 2026-08-20
+
+### Removed
+
+- Removed the seven `workflow-*` native Agent/MCP lifecycle skills because they are not part of the `codex-workflows` template CLI and their required MCP and hook surfaces are not registered by this plugin.
+
+### Changed
+
+- Focused plugin metadata, documentation, and methodology integration on asynchronous, adaptive, and persistent `codex exec` workflows.
+
 ## 0.7.0 — 2026-08-20
 
 ### Added

@@ -108,7 +108,7 @@ Corrupt or truncated state events block status/resume. Deterministic state track
 
 Prompt compilation defaults to and currently requires `read-only`. `workspace-write` and `danger-full-access` are rejected even if the prompt asks for them. A prompt, selector, or generated workflow cannot self-issue the separate Governor permit required for mutation.
 
-Read-only planning does not authorize Git/GitHub changes, comments, issue closure, pushes, pull requests, or any external mutation. Copy the result into an explicitly reviewed governed workflow when mutation is genuinely required.
+Read-only planning does not authorize Git/GitHub changes, comments, issue closure, pushes, pull requests, or any external mutation. Copy the result into an explicitly reviewed project workflow when mutation is genuinely required.
 
 ## Saving after review
 

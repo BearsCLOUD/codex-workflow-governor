@@ -109,7 +109,7 @@ A reusable workflow normally contains these responsibilities:
 
 `initial synthesis -> gap detection -> method planning -> worker fan-out -> independent critique -> correction -> re-synthesis -> owner stop gate`
 
-Use the explicit `workflow-create` or `workflow-update` skills to encode that graph, `workflow-check` and `workflow-analyze` to validate it, `workflow-apply` to materialize it, and `workflow-run` to execute it.
+Use `$codex-workflows` to compile a bounded one-off run from the objective or to create, validate, plan, and execute a reusable project workflow.
 
 The Governor owns the execution graph, immutable lock, permits, and run ledger. The task owns the evidence, gap map, method cards, and synthesis. Do not store research truth inside the execution graph.
 

@@ -1,11 +1,11 @@
 ---
 name: codex-workflows
-description: Run, monitor, save, and reuse asynchronous codex exec task graphs, prompt-compiled adaptive waves, and explicit until-cancelled monitors with bounded fan-out, strict JSON outputs, checkpoints, and persisted artifacts. Use when Codex needs parallel workers, dependent synthesis, method-selected research, detached execution, durable recurring discovery, or a reusable workflow; use direct codex exec for one isolated task, and use the Workflow Governor lifecycle skills for the native Agent/MCP governed backend.
+description: Run, monitor, save, and reuse asynchronous codex exec task graphs, prompt-compiled adaptive waves, and explicit until-cancelled monitors with bounded fan-out, strict JSON outputs, checkpoints, and persisted artifacts. Use when Codex needs parallel workers, dependent synthesis, method-selected research, detached execution, durable recurring discovery, or a reusable workflow; use direct codex exec for one isolated task.
 ---
 
 # Codex Workflows
 
-Resolve `scripts/codex_workflows.py` relative to this `SKILL.md` and use that absolute path as the executable interface (`CLI` below). In a full plugin checkout, the root `scripts/codex_workflows.py` is an equivalent convenience launcher. This skill covers the asynchronous `codex exec` backend. Do not substitute it for the existing `$workflow-create` / `$workflow-run` native-Agent lifecycle, which owns governed locks, permits, hooks, and MCP dispatch.
+Resolve `scripts/codex_workflows.py` relative to this `SKILL.md` and use that absolute path as the executable interface (`CLI` below). In a full plugin checkout, the root `scripts/codex_workflows.py` is an equivalent convenience launcher.
 
 ## Choose the smallest mechanism
 
