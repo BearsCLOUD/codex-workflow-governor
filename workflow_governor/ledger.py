@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .contracts import canonical_json, digest_json
+from .contracts import ContractError, canonical_json, digest_json, validate_identifier
 
 
 def utc_now() -> str:
@@ -23,16 +25,78 @@ class Ledger:
     def __init__(self, data_dir: Path | None = None) -> None:
         configured = data_dir or Path(os.environ.get("PLUGIN_DATA", Path.home() / ".codex" / "workflow-governor-data"))
         self.data_dir = configured.expanduser().resolve()
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_private_directory(self.data_dir)
         self.path = self.data_dir / "workflow-governor.sqlite3"
+        self._ensure_private_file(self.path)
         self._initialize()
+        self._secure_database_files()
+
+    @staticmethod
+    def _ensure_private_directory(path: Path) -> None:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if path.is_symlink() or not path.is_dir():
+            raise OSError(f"private data path is not a directory: {path}")
+        path.chmod(0o700)
+
+    @staticmethod
+    def _ensure_private_file(path: Path) -> None:
+        if path.is_symlink():
+            raise OSError(f"private data file must not be a symlink: {path}")
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError(f"private data file is not regular: {path}")
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+
+    def _secure_database_files(self) -> None:
+        for path in (self.path, Path(f"{self.path}-wal"), Path(f"{self.path}-shm"), Path(f"{self.path}-journal")):
+            if path.exists() or path.is_symlink():
+                self._ensure_private_file(path)
+
+    def _ensure_private_parent(self, path: Path) -> Path:
+        resolved = path.expanduser().resolve(strict=False)
+        if resolved == self.data_dir or self.data_dir not in resolved.parents:
+            raise ContractError(str(path), "private data path escapes PLUGIN_DATA")
+        relative_parent = resolved.parent.relative_to(self.data_dir)
+        current = self.data_dir
+        self._ensure_private_directory(current)
+        for part in relative_parent.parts:
+            current /= part
+            self._ensure_private_directory(current)
+        return resolved
+
+    def write_private_json(self, path: Path, value: Any) -> None:
+        """Atomically write sensitive runtime JSON with private permissions."""
+
+        target = self._ensure_private_parent(path)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(value, handle, ensure_ascii=False, sort_keys=True, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            target.chmod(0o600)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def connect(self) -> sqlite3.Connection:
+        self._ensure_private_file(self.path)
         connection = sqlite3.connect(self.path, timeout=15, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA busy_timeout = 15000")
+        self._secure_database_files()
         return connection
 
     @contextmanager
@@ -47,6 +111,7 @@ class Ledger:
             raise
         finally:
             connection.close()
+            self._secure_database_files()
 
     def _initialize(self) -> None:
         with self.connect() as connection:
@@ -153,8 +218,12 @@ class Ledger:
             ).fetchone()
 
     def draft_path(self, repository: str, workflow_id: str) -> Path:
+        workflow_id = validate_identifier(workflow_id, "workflow_id")
         repository_key = digest_json({"repository": str(Path(repository).resolve())})[:20]
-        return self.data_dir / "drafts" / repository_key / workflow_id / "draft.json"
+        path = (self.data_dir / "drafts" / repository_key / workflow_id / "draft.json").resolve(strict=False)
+        if self.data_dir not in path.parents:
+            raise ContractError("workflow_id", "draft path escapes PLUGIN_DATA")
+        return path
 
     def export_events(self, run_id: str, limit: int = 500) -> list[dict[str, Any]]:
         with self.connect() as connection:

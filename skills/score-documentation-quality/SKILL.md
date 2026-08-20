@@ -32,7 +32,7 @@ description: Адаптивно оценивать и улучшать Markdown-
 ## Выполнить быструю правку
 
 1. Прочитать каждый применимый файл один раз и выписать только owner, scope, routes, ограничения и удаляемые фрагменты.
-2. До удаления, замены или переименования сохранить точную исходную версию файла либо фрагмента в существующем non-authoritative archive вне instruction-loading paths. Если такого пути нет, использовать `legacy/instructions/<date>/`.
+2. До удаления, замены или переименования сохранить точную исходную версию файла либо фрагмента в существующем non-authoritative archive вне instruction-loading paths. Если такого пути нет, использовать `legacy/instructions/<date>/`. Исключение: не копировать в репозиторий credentials, токены, private keys, персональные данные или юридически ограниченный материал; при подозрении остановить зависимое удаление, запросить разрешённое защищённое хранилище и проверить Git history до публикации.
 3. Сохранять фактическую версию целевой ветки, а не устаревшую локальную копию. Проверить точность hash/blob-сравнением либо полным покрытием удаляемых нормативных строк.
 4. Не создавать JSONL/hash-chain archive, если пользователь или глубокий режим не требует byte-level восстановления отдельных spans.
 5. Изменить документы одним согласованным проходом сверху вниз: `AGENTS.md → DOCS.md → MODEL.md → WORKFLOW.md → contracts`.
@@ -62,7 +62,7 @@ description: Адаптивно оценивать и улучшать Markdown-
 Только после срабатывания deep-gate полностью прочитать [методологию](references/methodology.md) и [методику графа](references/semantic-graph-methodology.md).
 
 1. Зафиксировать immutable baseline и declared migration paths.
-2. Использовать `archive_instruction_content.py` для byte-exact archive, когда требуется восстановление отдельных spans или проверяемая hash chain.
+2. Использовать `archive_instruction_content.py` для byte-exact archive, когда требуется восстановление отдельных spans или проверяемая hash chain. Скрипт должен fail closed на распознаваемых secrets; чувствительный материал архивировать только вне репозитория в явно разрешённом защищённом контуре.
 3. Сохранять порядок `AGENTS.md → DOCS.md → MODEL.md → WORKFLOW.md → contracts`.
 4. Использовать line transactions, ledger и graph delta только для реально перемещаемых или конфликтующих decision units, а не для неизменяемого текста.
 5. Строить semantic graph только когда есть несколько owners/scopes, precedence/override, aliases, contract DAG или подозрение на цикл/противоречие, которое не покрывает прямая таблица.

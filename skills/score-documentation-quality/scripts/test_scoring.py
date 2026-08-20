@@ -218,6 +218,34 @@ class ScoringScriptsTest(unittest.TestCase):
         self.assertEqual(result["potential_score"], 100.0)
         self.assertEqual(result["confidence"], "high")
 
+    def test_archive_rejects_recognizable_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "legacy.env").write_text(
+                "OPENAI_API_KEY=" + "sk-" + "proj-" + "A" * 32 + "\n",
+                encoding="utf-8",
+            )
+            completed, _ = self.run_json(
+                sys.executable,
+                str(ARCHIVE),
+                "add",
+                "--root",
+                str(root),
+                "--source",
+                "legacy.env",
+                "--locator",
+                "whole file",
+                "--content-kind",
+                "normative",
+                "--reason",
+                "remove leaked credential",
+                "--target",
+                "deleted",
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("sensitive material", completed.stderr)
+            self.assertFalse((root / "archive" / "instructions.jsonl").exists())
+
     def test_byte_exact_archive_round_trip_and_tamper_detection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

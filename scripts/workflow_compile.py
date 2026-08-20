@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workflow_governor.compiler import compile_file, verify_generated_views, write_generated_views
-from workflow_governor.contracts import ContractError
+from workflow_governor.contracts import ContractError, workflow_directory
 
 
 def main() -> int:
@@ -21,8 +21,8 @@ def main() -> int:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     repository = args.repository.resolve()
-    source_path = repository / ".codex" / "workflows" / args.workflow_id / "workflow.json"
     try:
+        source_path = workflow_directory(repository, args.workflow_id) / "workflow.json"
         if args.check:
             errors = verify_generated_views(repository, args.workflow_id)
             print(json.dumps({"ok": not errors, "errors": errors}, sort_keys=True))
