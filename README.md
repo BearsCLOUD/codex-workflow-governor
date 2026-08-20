@@ -9,7 +9,7 @@ Version 1 targets the current Linux Codex runtime and uses only the Python stand
 ## Repository Layout
 
 - `.codex-plugin/plugin.json` defines the plugin.
-- `skills/` contains explicit workflow lifecycle skills.
+- `skills/` contains explicit workflow lifecycle and methodology skills.
 - `workflow_governor/` contains the compiler, contracts, ledger, MCP server, and hook implementation.
 - `scripts/` contains command-line entry points.
 - `hooks/hooks.json` registers bundled lifecycle hooks.
@@ -22,6 +22,10 @@ Guarded execution is available only when trusted hooks and native dispatch input
 
 ## Explicit Skills
 
-The plugin exposes `workflow-create`, `workflow-check`, `workflow-analyze`, `workflow-update`, `workflow-apply`, `workflow-visualize`, and `workflow-run`. Every skill disables implicit invocation. Drafting and updating never modify the target repository; only `workflow-apply` materializes a draft.
+The plugin exposes `workflow-create`, `workflow-check`, `workflow-analyze`, `workflow-update`, `workflow-apply`, `workflow-visualize`, and `workflow-run` for the workflow lifecycle.
+
+It also exposes `adaptive-deepening` and `graph-completion` as methodology skills for evidence-wave enrichment and knowledge-graph gap completion.
+
+Every skill disables implicit invocation. Drafting and updating never modify the target repository; only `workflow-apply` materializes a draft.
 
 The plugin never runs Git commands and never creates Git policy. Agents continue to follow the applicable repository instructions.
