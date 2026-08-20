@@ -1,7 +1,7 @@
 {
   "name": "codex-workflow-governor",
-  "version": "0.2.0+codex.20260820184355",
-  "description": "Compile and govern Codex workflows, evidence enrichment, and documentation instructions",
+  "version": "0.3.0+codex.20260820194758",
+  "description": "Govern native-Agent workflows and run reusable asynchronous codex exec graphs",
   "author": {
     "name": "BearsCLOUD",
     "url": "https://github.com/BearsCLOUD"
@@ -12,6 +12,8 @@
   "keywords": [
     "codex",
     "workflow",
+    "async",
+    "structured-output",
     "governance",
     "mcp",
     "documentation",
@@ -20,8 +22,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Workflow Governor",
-    "shortDescription": "Govern workflows, evidence methods, and documentation.",
-    "longDescription": "Create, validate, compile, visualize, and execute typed Codex workflows; deepen evidence and complete knowledge graphs; evaluate and improve documentation instructions with adaptive depth and lossless migration support.",
+    "shortDescription": "Govern agents and run async Codex task graphs.",
+    "longDescription": "Create and govern compiled native-Agent workflows or run reusable asynchronous codex exec graphs with bounded concurrency, explicit dependencies, strict structured outputs, monitoring, and persisted results.",
     "developerName": "BearsCLOUD",
     "category": "Development",
     "capabilities": [
@@ -32,6 +34,7 @@
       "Create an explicit workflow for this repository.",
       "Check the selected workflow and explain any drift.",
       "Run a guarded workflow by its workflow ID.",
+      "Analyze many independent items asynchronously and synthesize a structured result.",
       "Deepen an incomplete evidence synthesis through targeted waves.",
       "Complete decision-relevant knowledge graph gaps with provenance.",
       "Review and improve this repository's documentation instructions."

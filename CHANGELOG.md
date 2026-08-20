@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0 — 2026-08-20
+
+### Added
+
+- Added the self-contained `codex-workflows` skill and CLI for reusable asynchronous `codex exec` DAGs.
+- Added bounded fan-out, detached runs, cancellation, retries, strict JSON Schema outputs, dependency binding, and persisted run artifacts.
+- Added project, user, and built-in workflow scopes plus the `fanout-synthesize` template.
+- Added async runner and public-release security regression tests.
+- Added a security policy and private vulnerability reporting guidance.
+- Added conservative call budgets, per-task fan-out caps, project-wide writer serialization, and explicit write-sandbox opt-ins.
+
+### Security
+
+- Contained workflow IDs and generated paths inside validated Git worktrees.
+- Revalidated guarded-run lock identity, revision, and digest at stop time.
+- Restricted ledger, draft, and run-state permissions and rejected unsafe database symlinks.
+- Corrected MCP mutation annotations and made the documentation archive reject recognizable secrets.
+- Added workflow-snapshot integrity checks, process-group cancellation, strict local schema-keyword parity, finite-number checks, and symlink-safe generated writes.
+
+### Changed
+
+- Aligned package, MCP server, plugin, and changelog versions.
+- Documented the boundary between governed native-Agent workflows and asynchronous codex-exec workflows.
+
 ## 0.2.0 — 2026-08-20
 
 ### Added
