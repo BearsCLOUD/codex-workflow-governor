@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -3638,6 +3639,66 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-workspace-write", action="store_true")
     run.add_argument("--allow-danger-full-access", action="store_true")
 
+    def add_prompt_options(command: argparse.ArgumentParser, *, allow_detach: bool) -> None:
+        command.add_argument(
+            "--project-root",
+            dest="project_root",
+            default=argparse.SUPPRESS,
+            help="Repository or project root (may also precede the subcommand)",
+        )
+        source = command.add_mutually_exclusive_group(required=True)
+        source.add_argument("--prompt")
+        source.add_argument("--prompt-file")
+        command.add_argument(
+            "--method",
+            choices=("auto", "direct", "adaptive-deepening", "graph-completion", "hybrid"),
+            default="auto",
+        )
+        command.add_argument("--max-waves", type=int, default=3)
+        command.add_argument("--max-calls-per-wave", type=int, default=20)
+        command.add_argument("--max-total-calls", type=int)
+        command.add_argument("--max-parallel", type=int, default=4)
+        command.add_argument("--deadline", default="1h")
+        command.add_argument("--task-timeout", type=int, default=1800)
+        command.add_argument("--retries", type=int, default=1)
+        command.add_argument("--sandbox", choices=sorted(SANDBOXES), default="read-only")
+        command.add_argument("--allow-network", action="store_true")
+        command.add_argument("--source-constraint", action="append", default=[])
+        command.add_argument("--tool-constraint", action="append", default=[])
+        command.add_argument("--model")
+        command.add_argument("--reasoning-effort")
+        command.add_argument("--selector-model")
+        command.add_argument("--selector-reasoning-effort")
+        command.add_argument("--selector-timeout", type=int, default=300)
+        command.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", "codex"))
+        if allow_detach:
+            command.add_argument("--detach", action="store_true")
+
+    prompt_plan_parser = subparsers.add_parser(
+        "prompt-plan", help="Select a methodology and show a generated first-wave plan"
+    )
+    add_prompt_options(prompt_plan_parser, allow_detach=False)
+    prompt_run_parser = subparsers.add_parser(
+        "prompt-run", help="Compile and run bounded adaptive waves from one prompt"
+    )
+    add_prompt_options(prompt_run_parser, allow_detach=True)
+    prompt_status = subparsers.add_parser("prompt-status")
+    prompt_status.add_argument("run")
+    prompt_status.add_argument("--json", action="store_true")
+    prompt_result = subparsers.add_parser("prompt-result")
+    prompt_result.add_argument("run")
+    prompt_result.add_argument("--json", action="store_true")
+    prompt_resume = subparsers.add_parser("prompt-resume")
+    prompt_resume.add_argument("run")
+    prompt_save = subparsers.add_parser("prompt-save-template")
+    prompt_save.add_argument("run")
+    prompt_save.add_argument("--name", required=True)
+    prompt_save.add_argument("--wave", type=int)
+    prompt_save.add_argument("--scope", choices=("project", "user"), default="project")
+    prompt_save.add_argument("--reviewed", action="store_true")
+    prompt_worker = subparsers.add_parser("_prompt_worker", help=argparse.SUPPRESS)
+    prompt_worker.add_argument("run_dir")
+
     for name in ("status", "wait", "result", "cancel", "pause", "resume", "tail"):
         command = subparsers.add_parser(name)
         command.add_argument("run")
@@ -3661,6 +3722,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     project = _project_root(args.project_root)
     try:
+        if args.command.startswith("prompt-") or args.command == "_prompt_worker":
+            module_name = "workflow_governor._prompt_workflows_impl"
+            prompt_workflows = sys.modules.get(module_name)
+            if prompt_workflows is None:
+                prompt_path = Path(__file__).resolve().with_name("prompt_workflows.py")
+                specification = importlib.util.spec_from_file_location(module_name, prompt_path)
+                if specification is None or specification.loader is None:
+                    raise ContractError("prompt-workflows", f"cannot load {prompt_path}")
+                prompt_workflows = importlib.util.module_from_spec(specification)
+                sys.modules[module_name] = prompt_workflows
+                specification.loader.exec_module(prompt_workflows)
+            return prompt_workflows.command(args, project, sys.modules[__name__])
         if args.command == "agent":
             root = _project_agents_root(project)
             if args.agent_command == "schema":

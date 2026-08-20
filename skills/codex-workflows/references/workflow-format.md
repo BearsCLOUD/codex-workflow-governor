@@ -155,6 +155,8 @@ Every task schema must use a strict object at the root. Object schemas must incl
 
 The runner passes the schema to `codex exec --output-schema`, saves the final response, parses it as JSON, and validates it again locally. This establishes a machine-readable shape, not factual correctness.
 
+`prompt-plan` and `prompt-run` generate ordinary finite v1 workflows and strict schemas under private run artifacts, then pass them through this same loader and planner. Their method selection, adaptive gates, and durable result contract are documented in [prompt-workflows.md](prompt-workflows.md). Generated definitions are not saved into project or user scope without explicit reviewed `prompt-save-template` use.
+
 ## Inputs and commands
 
 Prefer an input file for arrays or objects:

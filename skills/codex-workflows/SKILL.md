@@ -1,6 +1,6 @@
 ---
 name: codex-workflows
-description: Run, monitor, save, and reuse asynchronous codex exec task graphs and explicit until-cancelled monitors with bounded fan-out, strict JSON outputs, checkpoints, and persisted artifacts. Use when Codex needs many independent exec workers, dependent synthesis, detached execution, durable recurring discovery, or a reusable project/user workflow; use direct codex exec for one isolated task, and use the Workflow Governor lifecycle skills when the native Agent/MCP governed workflow rather than this codex-exec backend is required.
+description: Run, monitor, save, and reuse asynchronous codex exec task graphs, prompt-compiled adaptive waves, and explicit until-cancelled monitors with bounded fan-out, strict JSON outputs, checkpoints, and persisted artifacts. Use when Codex needs parallel workers, dependent synthesis, method-selected research, detached execution, durable recurring discovery, or a reusable workflow; use direct codex exec for one isolated task, and use the Workflow Governor lifecycle skills for the native Agent/MCP governed backend.
 ---
 
 # Codex Workflows
@@ -10,11 +10,12 @@ Resolve `scripts/codex_workflows.py` relative to this `SKILL.md` and use that ab
 ## Choose the smallest mechanism
 
 1. Use one direct `codex exec` call for one isolated task with no reusable graph.
-2. Before designing anything, run `python3 "$CLI" workflow list` and reuse a compatible project, user, or built-in workflow.
-3. Create a workflow only for repeated use, bounded fan-out, explicit dependencies, detached operation, or durable outputs.
-4. Do not encode a deterministic calculation as a model task. Implement it in code and reserve exec tasks for model work.
+2. Use `prompt-plan` then `prompt-run` for a bounded one-off objective whose method and evidence gaps must be derived from the prompt.
+3. Before designing a reusable graph, run `python3 "$CLI" workflow list` and reuse a compatible project, user, or built-in workflow.
+4. Create a workflow only for repeated use, bounded fan-out, explicit dependencies, detached operation, or durable outputs.
+5. Do not encode a deterministic calculation as a model task. Implement it in code and reserve exec tasks for model work.
 
-Read [methodology.md](references/methodology.md) before creating or materially changing a workflow. Read [workflow-format.md](references/workflow-format.md) when editing `workflow.json`, schemas, inputs, or templates. Read [loop-workflows.md](references/loop-workflows.md) before creating, running, pausing, resuming, or authorizing a persistent loop.
+Read [methodology.md](references/methodology.md) before creating or materially changing a workflow. Read [workflow-format.md](references/workflow-format.md) when editing `workflow.json`, schemas, inputs, or templates. Read [prompt-workflows.md](references/prompt-workflows.md) before using prompt compilation. Read [loop-workflows.md](references/loop-workflows.md) before creating, running, pausing, resuming, or authorizing a persistent loop.
 
 ## Choose task configuration
 
@@ -56,6 +57,19 @@ python3 "$CLI" --project-root "$PROJECT" cancel RUN_ID
 ```
 
 Treat `state.jsonl` and `checkpoint.json` as durable authority and `STATE.md` as a generated view. A circuit-open loop requires an explicit `resume`; investigate its recorded failures first. A persistent loop is never implied by task retries, a prompt, or a request to monitor—only the validated root `loop` object creates one.
+
+For a one-off adaptive objective, inspect the compiler output before execution:
+
+```bash
+python3 "$CLI" --project-root "$PROJECT" prompt-plan --prompt "OBJECTIVE" \
+  --max-waves 3 --max-calls-per-wave 20 --deadline 1h
+python3 "$CLI" --project-root "$PROJECT" prompt-run --prompt "OBJECTIVE" \
+  --max-waves 3 --max-calls-per-wave 20 --deadline 1h --detach
+python3 "$CLI" --project-root "$PROJECT" prompt-status PROMPT_RUN_ID --json
+python3 "$CLI" --project-root "$PROJECT" prompt-result PROMPT_RUN_ID
+```
+
+Return the detached run ID; do not poll on the user's behalf. Prompt compilation is read-only and never self-authorizes writes. Do not save a generated definition unless the user has reviewed it and explicitly requests `prompt-save-template --reviewed`.
 
 Use repeated `--input key=JSON` instead of `--inputs FILE` only for small values. A `wait` exit code of `1` means the run reached failed/cancelled state; code `2` means only that monitoring timed out, so call `status` again. Treat a blocked dependency, missing result, or schema failure as failed work; inspect persisted state and task artifacts rather than inventing an answer.
 

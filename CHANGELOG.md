@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 — 2026-08-20
+
+### Added
+
+- Added `prompt-plan` and `prompt-run` to select `direct`, `adaptive-deepening`, `graph-completion`, or a bounded hybrid from one prompt through a strict read-only `codex exec` selection pass.
+- Added generated validated wave DAGs with bounded evidence fan-out, separate validation and critique contexts, owner-only fact acceptance, deterministic next-wave gates, total-call/deadline stops, and resumable detached execution.
+- Added `prompt-status`, `prompt-result`, `prompt-resume`, and review-gated `prompt-save-template`, plus durable prompt, selection, methodology snapshots, wave definitions, evidence artifacts, gap/graph state, hash-chained events, and Markdown/JSON results.
+
+### Security
+
+- Prompt compilation is read-only and rejects requested write sandboxes because prompts and generated plans cannot self-issue Governor mutation permits.
+- Installed methodology paths, plugin version, snapshots, and SHA-256 digests are pinned and revalidated before resumed execution; repository content and upstream outputs remain untrusted task data.
+
 ## 0.6.0 — 2026-08-20
 
 ### Added

@@ -38,6 +38,31 @@ def option(name: str) -> str:
 
 
 def classify(prompt: str) -> dict[str, object]:
+    if prompt.startswith("METHOD-SELECTION"):
+        if "SELECTOR-FAIL" in prompt:
+            return {"kind": "selector-fail"}
+        if "INVALID-SELECTION" in prompt:
+            return {"kind": "selector-invalid"}
+        method = "direct"
+        for marker, selected in (
+            ("SELECT-ADAPTIVE", "adaptive-deepening"),
+            ("SELECT-GRAPH", "graph-completion"),
+            ("SELECT-HYBRID", "hybrid"),
+        ):
+            if marker in prompt:
+                method = selected
+        return {"kind": "selector", "method": method}
+    for prefix, kind in (
+        ("PROMPT-DIRECT-ANSWER", "prompt-direct"),
+        ("PROMPT-BASELINE", "prompt-baseline"),
+        ("PROMPT-GAP-DETECTION", "prompt-gaps"),
+        ("PROMPT-ENRICH", "prompt-enrich"),
+        ("PROMPT-VALIDATION", "prompt-validation"),
+        ("PROMPT-CRITIQUE", "prompt-critique"),
+        ("PROMPT-OWNER", "prompt-owner"),
+    ):
+        if prompt.startswith(prefix):
+            return {"kind": kind}
     match = re.search(r"FANOUT index=(\d+) item=(-?\d+)", prompt)
     if match:
         return {"kind": "fanout", "index": int(match.group(1))}
@@ -151,6 +176,157 @@ try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
         final_path.write_text("{this is not json", encoding="utf-8")
         raise SystemExit(0)
+    elif identity["kind"] == "selector-invalid":
+        final_path = Path(option("--output-last-message"))
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        final_path.write_text("{invalid selection", encoding="utf-8")
+        raise SystemExit(0)
+    elif identity["kind"] == "selector-fail":
+        raise SystemExit(9)
+    elif identity["kind"] == "selector":
+        output = {
+            "method": identity["method"],
+            "objective": "Fixture objective",
+            "consumer": "Repository operator",
+            "decision_or_target_query": "Resolve the fixture target query",
+            "required_output": "Evidence-backed Markdown and strict JSON",
+            "minimum_inputs": ["objective", "project root", "operational bounds"],
+            "source_constraints": ["Use fixture sources"],
+            "tool_constraints": ["Use read-only tools"],
+            "costly_if_wrong": ["Ownership mapping"],
+            "quality_threshold": "Every load-bearing claim has evidence",
+            "stop_rule": "Stop when high-impact gaps are resolved or unresolved",
+            "rationale": "Selected from the installed methodology contract",
+        }
+    elif identity["kind"] == "prompt-direct":
+        if "SLOW-DEADLINE" in prompt:
+            time.sleep(60)
+        output = {
+            "synthesis": "Direct fixture answer",
+            "evidence_refs": ["fixture:direct"],
+            "limitations": [],
+        }
+    elif identity["kind"] == "prompt-baseline":
+        output = {
+            "synthesis": "Baseline fixture synthesis",
+            "risky_claims": ["Fixture claim"],
+            "candidate_facts": [],
+            "limitations": [],
+        }
+    elif identity["kind"] == "prompt-gaps":
+        output = {
+            "gaps": [{
+                "id": "gap-1",
+                "description": "Resolve the fixture gap",
+                "affected_claim": "Fixture claim",
+                "impact": "high",
+                "status": "open",
+                "expected_value_score": 10,
+                "estimated_cost_calls": 1,
+                "method": "graph-completion" if "SELECT-GRAPH" in prompt else "adaptive-deepening",
+                "method_card": "Inspect fixture evidence and validate provenance",
+                "stop_condition": "One independent source or explicit unresolved status",
+                "evidence_refs": [],
+            }]
+        }
+    elif identity["kind"] == "prompt-enrich":
+        output = {
+            "gap_id": "initial-objective" if "initial-objective" in prompt else "gap-1",
+            "summary": "Fixture evidence packet",
+            "evidence": [{
+                "claim": "Fixture claim",
+                "source_ref": "fixture:source",
+                "location": "fixture:1",
+                "observed_at": "2026-08-20T00:00:00Z",
+                "independent": True,
+            }],
+            "candidate_facts": [{
+                "id": "fact-1",
+                "subject": "service-a",
+                "predicate": "owned-by",
+                "object": "team-a",
+                "status": "candidate",
+                "sources": [{
+                    "ref": "fixture:source",
+                    "location": "fixture:1",
+                    "observed_at": "2026-08-20T00:00:00Z",
+                    "independent": True,
+                }],
+                "valid_time": "2026-08-20",
+                "confidence_reason": "Primary fixture evidence",
+            }],
+            "limitations": [],
+        }
+    elif identity["kind"] == "prompt-validation":
+        output = {
+            "facts": [{
+                "id": "fact-1",
+                "subject": "service-a",
+                "predicate": "owned-by",
+                "object": "team-a",
+                "status": "candidate",
+                "sources": [{
+                    "ref": "fixture:source",
+                    "location": "fixture:1",
+                    "observed_at": "2026-08-20T00:00:00Z",
+                    "independent": True,
+                }],
+                "valid_time": "2026-08-20",
+                "confidence_reason": "Validated fixture provenance",
+            }],
+            "issues": [],
+        }
+    elif identity["kind"] == "prompt-critique":
+        if "CRITIQUE-FAIL" in prompt:
+            raise SystemExit(9)
+        output = {"discrepancies": [], "unresolved_conflicts": []}
+    elif identity["kind"] == "prompt-owner":
+        wave_match = re.search(r"Wave: (\d+)", prompt)
+        wave = int(wave_match.group(1)) if wave_match else 1
+        continue_wave = ("TWO-WAVES" in prompt or "BUDGET-STOP" in prompt) and wave == 1
+        conflicted = "UNRESOLVED-CONFLICT" in prompt
+        gaps = [] if "SELECT-DIRECT" in prompt else [{
+            "id": "gap-1",
+            "description": "Resolve the fixture gap",
+            "affected_claim": "Fixture claim",
+            "impact": "high",
+            "status": "open" if continue_wave else ("unresolved" if conflicted else "resolved"),
+            "expected_value_score": 10,
+            "estimated_cost_calls": 1,
+            "method": "graph-completion" if "SELECT-GRAPH" in prompt else "adaptive-deepening",
+            "method_card": "Inspect fixture evidence and validate provenance",
+            "stop_condition": "One independent source or explicit unresolved status",
+            "evidence_refs": ["fixture:source"],
+        }]
+        facts = [] if "SELECT-DIRECT" in prompt else [{
+            "id": "fact-1",
+            "subject": "service-a",
+            "predicate": "owned-by",
+            "object": "team-a",
+            "status": "conflicted" if conflicted else "accepted",
+            "sources": [{
+                "ref": "fixture:source",
+                "location": "fixture:1",
+                "observed_at": "2026-08-20T00:00:00Z",
+                "independent": True,
+            }],
+            "valid_time": "2026-08-20",
+            "confidence_reason": "Owner reviewed fixture provenance",
+        }]
+        output = {
+            "synthesis": "Owner fixture synthesis",
+            "gaps": gaps,
+            "graph_facts": facts,
+            "conflicts": ["Fixture conflict remains unresolved"] if conflicted else [],
+            "limitations": ["Fixture limitation"] if conflicted else [],
+            "next_wave_gap_ids": ["gap-1"] if continue_wave else [],
+            "wave_change_summary": f"Completed fixture wave {wave}",
+            "stop": {
+                "should_stop": not continue_wave,
+                "reason": "fixture-complete" if not continue_wave else "continue-high-impact-gap",
+                "rationale": "Fixture owner gate",
+            },
+        }
     elif identity["kind"] == "loop-discover":
         cursor = str(identity.get("cursor") or "0")
         next_cursor = str(int(cursor) + 1)
@@ -1642,6 +1818,271 @@ class LoopWorkflowTests(ExecRunnerTestCase):
         self.assertEqual(cancel_code, 0, cancel_stderr)
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "cancelled")
+
+
+class PromptWorkflowTests(ExecRunnerTestCase):
+    def prompt_arguments(self, objective: str) -> tuple[str, ...]:
+        return (
+            "--prompt",
+            objective,
+            "--codex-bin",
+            str(self.fake_codex),
+            "--max-waves",
+            "3",
+            "--max-calls-per-wave",
+            "10",
+            "--max-total-calls",
+            "30",
+            "--retries",
+            "0",
+            "--deadline",
+            "5m",
+        )
+
+    def only_prompt_run_dir(self) -> Path:
+        run_files = list(self.data.glob("prompt-runs/*/*/run.json"))
+        self.assertEqual(len(run_files), 1, run_files)
+        return run_files[0].parent
+
+    def test_prompt_plan_selects_each_method_and_discloses_pins_bounds_permissions(self) -> None:
+        cases = {
+            "SELECT-DIRECT": "direct",
+            "SELECT-ADAPTIVE": "adaptive-deepening",
+            "SELECT-GRAPH": "graph-completion",
+            "SELECT-HYBRID": "hybrid",
+        }
+        for marker, method in cases.items():
+            with self.subTest(method=method):
+                code, stdout, stderr = self.invoke(
+                    "prompt-plan", *self.prompt_arguments(marker)
+                )
+                self.assertEqual(code, 0, stderr)
+                plan = json.loads(stdout)
+                self.assertEqual(plan["selection"]["method"], method)
+                self.assertTrue(plan["selection"]["rationale"])
+                self.assertEqual(plan["permissions"]["sandbox"], "read-only")
+                self.assertFalse(plan["permissions"]["workspace_write"])
+                self.assertEqual(plan["cost_model"]["selection_calls"], 1)
+                self.assertLessEqual(plan["cost_model"]["first_wave_calls"], 10)
+                self.assertEqual(
+                    set(plan["methodology_pins"]["skills"]),
+                    {"adaptive-deepening", "graph-completion"},
+                )
+                self.assertTrue(
+                    all(
+                        len(pin["sha256"]) == 64
+                        for pin in plan["methodology_pins"]["skills"].values()
+                    )
+                )
+                task_ids = [task["id"] for task in plan["first_wave"]["workflow"]["tasks"]]
+                self.assertIn("critique", task_ids)
+                self.assertEqual(task_ids[-1], "owner")
+
+    def test_invalid_selection_and_write_request_fail_before_run(self) -> None:
+        code, _, stderr = self.invoke(
+            "prompt-plan", *self.prompt_arguments("INVALID-SELECTION")
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("Expecting property name", stderr)
+        failed_code, _, failed_stderr = self.invoke(
+            "prompt-plan", *self.prompt_arguments("SELECTOR-FAIL")
+        )
+        self.assertEqual(failed_code, 2)
+        self.assertIn("codex exec exited with 9", failed_stderr)
+        write_args = list(self.prompt_arguments("SELECT-DIRECT"))
+        write_args.extend(["--sandbox", "workspace-write"])
+        write_code, _, write_stderr = self.invoke("prompt-run", *write_args)
+        self.assertEqual(write_code, 2)
+        self.assertIn("read-only", write_stderr)
+        self.assertEqual(list(self.data.glob("prompt-runs/*/*/run.json")), [])
+
+    def test_direct_prompt_run_result_and_explicit_template_save(self) -> None:
+        code, stdout, stderr = self.invoke(
+            "prompt-run", *self.prompt_arguments("SELECT-DIRECT repository lookup")
+        )
+        self.assertEqual(code, 0, stderr)
+        run_id = stdout.split()[0]
+        run_dir = self.only_prompt_run_dir()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["stop_reason"], "direct-complete")
+        self.assertEqual(state["completed_waves"], 1)
+        self.assertTrue((run_dir / "result.md").is_file())
+        self.assertTrue((run_dir / "result.json").is_file())
+        self.assertTrue((run_dir / "state.jsonl").is_file())
+        self.assertTrue((run_dir / "STATE.md").is_file())
+
+        result_code, result_stdout, result_stderr = self.invoke(
+            "prompt-result", run_id, "--json"
+        )
+        self.assertEqual(result_code, 0, result_stderr)
+        result = json.loads(result_stdout)
+        self.assertEqual(result["method_selection"]["method"], "direct")
+
+        rejected_code, _, rejected_stderr = self.invoke(
+            "prompt-save-template", run_id, "--name", "saved-prompt"
+        )
+        self.assertEqual(rejected_code, 2)
+        self.assertIn("--reviewed", rejected_stderr)
+        save_code, _, save_stderr = self.invoke(
+            "prompt-save-template",
+            run_id,
+            "--name",
+            "saved-prompt",
+            "--reviewed",
+        )
+        self.assertEqual(save_code, 0, save_stderr)
+        validate_code, _, validate_stderr = self.invoke(
+            "workflow", "validate", "project:saved-prompt"
+        )
+        self.assertEqual(validate_code, 0, validate_stderr)
+
+    def test_adaptive_second_wave_and_budget_stop_are_deterministic(self) -> None:
+        code, stdout, stderr = self.invoke(
+            "prompt-run", *self.prompt_arguments("SELECT-ADAPTIVE TWO-WAVES")
+        )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_prompt_run_dir()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["completed_waves"], 2)
+        self.assertEqual(len(state["wave_log"]), 2)
+        self.assertEqual(len(state["graph_facts"]), 1)
+        self.assertEqual(state["status"], "completed")
+        events = [
+            json.loads(line)
+            for line in (run_dir / "state.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        compiled = [event for event in events if event["event"] == "wave.compiled"]
+        self.assertEqual(compiled[0]["metadata"]["named_gaps"], ["gap-1"])
+
+        budget_args = list(self.prompt_arguments("SELECT-ADAPTIVE BUDGET-STOP"))
+        total_index = budget_args.index("--max-total-calls") + 1
+        budget_args[total_index] = "11"
+        budget_code, budget_stdout, budget_stderr = self.invoke(
+            "prompt-run", *budget_args
+        )
+        self.assertEqual(budget_code, 0, budget_stderr)
+        budget_run = budget_stdout.split()[0]
+        budget_dir = next(
+            path.parent
+            for path in self.data.glob("prompt-runs/*/*/run.json")
+            if path.parent.name == budget_run
+        )
+        budget_state = json.loads(
+            (budget_dir / "run.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(budget_state["run_id"], budget_run)
+        self.assertEqual(budget_state["stop_reason"], "call-budget")
+        self.assertEqual(budget_state["completed_waves"], 1)
+
+    def test_critique_failure_and_unresolved_conflict_are_preserved(self) -> None:
+        code, stdout, stderr = self.invoke(
+            "prompt-run", *self.prompt_arguments("SELECT-GRAPH CRITIQUE-FAIL")
+        )
+        self.assertEqual(code, 1, stderr)
+        run_dir = self.only_prompt_run_dir()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["stop_reason"], "critique-failed")
+
+        conflict_code, conflict_stdout, conflict_stderr = self.invoke(
+            "prompt-run", *self.prompt_arguments("SELECT-GRAPH UNRESOLVED-CONFLICT")
+        )
+        self.assertEqual(conflict_code, 0, conflict_stderr)
+        conflict_run = conflict_stdout.split()[0]
+        result_code, result_stdout, result_stderr = self.invoke(
+            "prompt-result", conflict_run, "--json"
+        )
+        self.assertEqual(result_code, 0, result_stderr)
+        result = json.loads(result_stdout)
+        self.assertEqual(result["graph_facts"][0]["status"], "conflicted")
+        self.assertIn("Fixture conflict remains unresolved", result["conflicts"])
+
+    def test_prompt_run_stops_at_hard_deadline(self) -> None:
+        arguments = list(self.prompt_arguments("SELECT-DIRECT SLOW-DEADLINE"))
+        deadline_index = arguments.index("--deadline") + 1
+        arguments[deadline_index] = "1s"
+        started = time.monotonic()
+        code, _, stderr = self.invoke("prompt-run", *arguments)
+        self.assertEqual(code, 1, stderr)
+        self.assertLess(time.monotonic() - started, 4)
+        state = json.loads(
+            (self.only_prompt_run_dir() / "run.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["stop_reason"], "deadline")
+
+    def test_detached_prompt_run_finishes_without_caller_polling(self) -> None:
+        started = time.monotonic()
+        code, stdout, stderr = self.invoke(
+            "prompt-run",
+            *self.prompt_arguments("SELECT-DIRECT detached"),
+            "--detach",
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertLess(time.monotonic() - started, 2)
+        run_id = stdout.strip()
+        run_dir = self.only_prompt_run_dir()
+        for _ in range(500):
+            state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            if state["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("detached prompt worker did not finish")
+        self.assertEqual(state["status"], "completed", (run_dir / "worker.log").read_text())
+        status_code, _, status_stderr = self.invoke("prompt-status", run_id, "--json")
+        self.assertEqual(status_code, 0, status_stderr)
+
+    def test_prompt_resume_continues_from_committed_wave_without_duplicate_work(self) -> None:
+        plan_code, _, plan_stderr = self.invoke(
+            "prompt-plan",
+            *self.prompt_arguments("SELECT-ADAPTIVE TWO-WAVES restart"),
+        )
+        self.assertEqual(plan_code, 0, plan_stderr)
+        with patch("workflow_governor._prompt_workflows_impl._spawn_worker"):
+            code, stdout, stderr = self.invoke(
+                "prompt-run",
+                *self.prompt_arguments("SELECT-ADAPTIVE TWO-WAVES restart"),
+                "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_id = stdout.strip()
+        run_dir = self.only_prompt_run_dir()
+        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        prompt_module = sys.modules["workflow_governor._prompt_workflows_impl"]
+        original_compile = prompt_module._compile_wave
+
+        def interrupt_before_second_wave(*arguments: object, **keywords: object):
+            definition = Path(arguments[0])
+            if definition.parent.name == "0002":
+                raise OSError("simulated supervisor interruption")
+            return original_compile(*arguments, **keywords)
+
+        with patch.object(prompt_module, "_compile_wave", new=interrupt_before_second_wave):
+            with self.assertRaisesRegex(OSError, "simulated supervisor interruption"):
+                asyncio.run(prompt_module.execute_prompt_run(run_dir, implementation))
+        interrupted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(interrupted["status"], "failed")
+        self.assertEqual(interrupted["completed_waves"], 1)
+        self.assertEqual(interrupted["current_wave"], 2)
+        calls_after_first = len(self.fake_log()["starts"])
+
+        with patch("workflow_governor._prompt_workflows_impl._spawn_worker"):
+            resume_code, _, resume_stderr = self.invoke("prompt-resume", run_id)
+        self.assertEqual(resume_code, 0, resume_stderr)
+        self.assertEqual(
+            asyncio.run(prompt_module.execute_prompt_run(run_dir, implementation)), 0
+        )
+        resumed = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(resumed["status"], "completed")
+        self.assertEqual(resumed["completed_waves"], 2)
+        self.assertEqual(len(resumed["charged_waves"]), 2)
+        self.assertEqual(len(self.fake_log()["starts"]) - calls_after_first, 6)
+        with (run_dir / "state.jsonl").open("ab") as handle:
+            handle.write(b'{"truncated":true}')
+        corrupt_code, _, corrupt_stderr = self.invoke("prompt-status", run_id)
+        self.assertEqual(corrupt_code, 2)
+        self.assertIn("truncated tail", corrupt_stderr)
 
 
 if __name__ == "__main__":

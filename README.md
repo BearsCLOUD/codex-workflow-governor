@@ -67,6 +67,34 @@ The supervisor watches Codex JSONL events while the child is live. After `turn.c
 
 The graph, readiness, dependency blocking, fan-out item order, and artifact layout are deterministic for fixed workflow files and inputs. Model text and semantics are not deterministic.
 
+### Prompt-first adaptive runs
+
+For a bounded one-off objective that needs method selection but not a hand-authored reusable workflow, `prompt-plan` runs a small strict read-only selection pass and compiles the first validated wave. It chooses `direct`, `adaptive-deepening`, `graph-completion`, or `hybrid` from the installed methodology contracts, records their exact paths and SHA-256 digests, and discloses inferred contracts, permissions, fan-out, retries, model settings, deadline, and conservative cost before execution.
+
+Repository-analysis example:
+
+```bash
+python3 "$CLI" --project-root "$PROJECT" prompt-plan \
+  --prompt "Map repository ownership and provenance paths, then report unresolved high-impact gaps" \
+  --max-waves 3 --max-calls-per-wave 20 --max-parallel 4 --deadline 1h
+python3 "$CLI" --project-root "$PROJECT" prompt-run \
+  --prompt "Map repository ownership and provenance paths, then report unresolved high-impact gaps" \
+  --max-waves 3 --max-calls-per-wave 20 --max-parallel 4 --deadline 1h --detach
+```
+
+External-research example, with network use disclosed explicitly:
+
+```bash
+python3 "$CLI" --project-root "$PROJECT" prompt-plan \
+  --prompt-file market-question.md --allow-network \
+  --source-constraint "Prefer current primary sources and record publication dates" \
+  --max-waves 4 --max-calls-per-wave 30 --deadline 2h
+```
+
+Use `prompt-status RUN_ID`, `prompt-result RUN_ID`, and `prompt-resume RUN_ID`. Each generated wave is a normal strict exec-workflow DAG; evidence workers cannot accept facts, validation cannot promote candidates, critique is a separate `codex exec` context, and only the owner output may accept/reject facts or propose named next gaps. Normal code checks that a proposed next gap is open, high-impact, and worth more than its declared call cost, then stops at the method gate, wave cap, total-call budget, or deadline.
+
+Prompt compilation is intentionally read-only. It rejects `workspace-write` and `danger-full-access`: a prompt or model-generated workflow cannot create its own Governor permit. Successful generated definitions are never saved automatically; `prompt-save-template --reviewed` is the explicit review boundary. See [`prompt-workflows.md`](skills/codex-workflows/references/prompt-workflows.md) for contracts, artifacts, restart behavior, and safety limits.
+
 ### Pinned project agents
 
 `codex-exec-workflow.v2` binds tasks to managed project-scoped custom agents under `.codex/agents/`, following the [official Codex custom-agent contract](https://developers.openai.com/codex/subagents/). Each workflow records a byte-exact SHA-256 and its own TOML snapshot. Validation compares the project role, snapshot, digest, name, model, reasoning effort, and sandbox before planning or starting workers.
