@@ -109,6 +109,17 @@ MAINTAINER_TOOLS = [
 ]
 
 
+DESTRUCTIVE_TOOLS = {
+    "workflow_draft",
+    "workflow_apply",
+    "workflow_prepare_dispatch",
+    "workflow_submit_result",
+    "workflow_advance",
+    "workflow_render",
+}
+IDEMPOTENT_WRITE_TOOLS = {"workflow_draft", "workflow_apply", "workflow_render"}
+
+
 class McpServer:
     def __init__(self, surface: str) -> None:
         if surface not in {"reader", "maintainer"}:
@@ -123,7 +134,12 @@ class McpServer:
                 "name": name,
                 "description": description,
                 "inputSchema": schema,
-                "annotations": {"readOnlyHint": read_only, "destructiveHint": False, "idempotentHint": read_only},
+                "annotations": {
+                    "readOnlyHint": read_only,
+                    "destructiveHint": name in DESTRUCTIVE_TOOLS,
+                    "idempotentHint": read_only or name in IDEMPOTENT_WRITE_TOOLS,
+                    "openWorldHint": False,
+                },
             }
             for name, description, schema, read_only in self.tools
         ]
@@ -163,7 +179,7 @@ class McpServer:
                 result = {
                     "protocolVersion": request.get("params", {}).get("protocolVersion", "2025-06-18"),
                     "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": f"codex-workflow-governor-{self.surface}", "version": "0.1.0"},
+                    "serverInfo": {"name": f"codex-workflow-governor-{self.surface}", "version": "0.3.0"},
                 }
             elif method == "ping":
                 result = {}
@@ -171,13 +187,15 @@ class McpServer:
                 result = {"tools": self.tool_list()}
             elif method == "tools/call":
                 params = request.get("params") or {}
+                if not isinstance(params, dict):
+                    raise ContractError("params", "must be an object")
                 value = self.call(params.get("name"), params.get("arguments") or {})
                 text = json.dumps(value, ensure_ascii=False, sort_keys=True)
                 result = {"content": [{"type": "text", "text": text}], "structuredContent": value, "isError": False}
             else:
                 return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
-        except (ContractError, OSError, ValueError, KeyError) as exc:
+        except (ContractError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             if method == "tools/call":
                 value = {"error": str(exc)}
                 return {

@@ -110,6 +110,26 @@ def _identifier(value: Any, path: str) -> str:
     return result
 
 
+def validate_identifier(value: Any, path: str = "identifier") -> str:
+    """Validate an externally supplied identifier before using it in a path."""
+
+    return _identifier(value, path)
+
+
+def workflow_directory(repository: Path, workflow_id: Any) -> Path:
+    """Resolve one workflow directory and prove that it stays in the repository."""
+
+    identifier = validate_identifier(workflow_id, "workflow_id")
+    root = repository.expanduser().resolve()
+    workflows_root = (root / ".codex" / "workflows").resolve(strict=False)
+    if workflows_root != root and root not in workflows_root.parents:
+        raise ContractError("repository", "workflow root resolves outside the repository")
+    candidate = (workflows_root / identifier).resolve(strict=False)
+    if candidate == workflows_root or workflows_root not in candidate.parents:
+        raise ContractError("workflow_id", "workflow directory resolves outside the workflow root")
+    return candidate
+
+
 def _digest(value: Any, path: str) -> str:
     result = _string(value, path)
     if not SHA256.fullmatch(result):

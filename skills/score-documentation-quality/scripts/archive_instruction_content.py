@@ -32,10 +32,37 @@ HEAD_FIELDS = {
     "schema_version", "archive_path", "records", "archive_size", "archive_sha256",
     "tail_id", "tail_record_sha256",
 }
+SENSITIVE_PATTERNS = (
+    (re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "private key"),
+    (
+        re.compile(
+            rb"\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{16,})\b"
+        ),
+        "credential token",
+    ),
+    (
+        re.compile(
+            rb"(?im)^\s*[A-Z0-9_]*(?:PASSWORD|TOKEN|SECRET|API_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*[:=]\s*(?!\s*(?:<|\$\{|REDACTED\b|CHANGEME\b|EXAMPLE\b|DUMMY\b))\S{8,}"
+        ),
+        "secret assignment",
+    ),
+)
 
 
 class ArchiveError(ValueError):
     pass
+
+
+def reject_sensitive_content(content: bytes) -> None:
+    """Fail closed instead of copying recognizable secrets into a repository archive."""
+
+    findings = sorted({label for pattern, label in SENSITIVE_PATTERNS if pattern.search(content)})
+    if findings:
+        raise ArchiveError(
+            "Source appears to contain sensitive material "
+            f"({', '.join(findings)}); do not preserve it in the repository archive. "
+            "Use an authorized secure location and review Git history before publication."
+        )
 
 
 def valid_text(value: Any) -> bool:
@@ -412,6 +439,7 @@ def command_add(args: argparse.Namespace) -> dict[str, Any]:
         if start < 0 or end < start or end > len(data) or (args.start_byte is not None and end == start):
             raise ArchiveError("Byte range должен находиться внутри source; span должен быть непустым.")
         content = data[start:end]
+        reject_sensitive_content(content)
 
         archive_parent, archive_name = open_parent(root_fd, args.archive, create=True)
         archive_fd = open_regular_at(

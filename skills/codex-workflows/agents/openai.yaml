@@ -1,0 +1,8 @@
+interface:
+  display_name: "Codex Workflows"
+  short_description: "Run reusable asynchronous Codex task graphs"
+  default_prompt: "Use $codex-workflows to reuse or run an asynchronous codex exec workflow with strict outputs and persisted results."
+
+policy:
+  allow_implicit_invocation: true
+

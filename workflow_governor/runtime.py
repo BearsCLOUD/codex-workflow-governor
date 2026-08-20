@@ -23,7 +23,9 @@ from .contracts import (
     digest_bytes,
     digest_json,
     load_json,
+    validate_identifier,
     validate_typed_values,
+    workflow_directory,
 )
 from .ledger import Ledger, utc_now
 
@@ -45,11 +47,14 @@ def _repository(value: str) -> Path:
     path = Path(value).expanduser().resolve()
     if not path.is_dir():
         raise ContractError("repository", f"not a directory: {path}")
+    git_marker = path / ".git"
+    if not git_marker.exists() or not (git_marker.is_dir() or git_marker.is_file()):
+        raise ContractError("repository", f"not a Git worktree: {path}")
     return path
 
 
 def _workflow_dir(repository: Path, workflow_id: str) -> Path:
-    return repository / ".codex" / "workflows" / workflow_id
+    return workflow_directory(repository, workflow_id)
 
 
 def _lock(repository: Path, workflow_id: str) -> dict[str, Any]:
@@ -178,6 +183,8 @@ class WorkflowRuntime:
         run_id: str | None = None,
     ) -> dict[str, Any]:
         root = str(_repository(repository))
+        if workflow_id is not None:
+            workflow_id = validate_identifier(workflow_id, "workflow_id")
         query = "SELECT * FROM runs WHERE repository = ?"
         values: list[Any] = [root]
         if workflow_id:
@@ -228,6 +235,7 @@ class WorkflowRuntime:
         role_files: dict[str, str],
     ) -> dict[str, Any]:
         root = _repository(repository)
+        workflow_id = validate_identifier(workflow_id, "workflow_id")
         normalized = decode_source(source)
         if normalized["workflow_id"] != workflow_id:
             raise ContractError("workflow_id", "does not match source.workflow_id")
@@ -247,8 +255,7 @@ class WorkflowRuntime:
                 raise ContractError(f"role_files.{relative}", f"digest must equal {role['digest']}, observed {observed}")
         draft = {"repository": str(root), "workflow_id": workflow_id, "source": normalized, "role_files": role_files}
         path = self.ledger.draft_path(str(root), workflow_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(draft, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        self.ledger.write_private_json(path, draft)
         with self.ledger.transaction() as connection:
             self.ledger.record_event(connection, "draft.saved", {"repository": str(root), "workflow_id": workflow_id, "draft_digest": digest_json(draft)})
         return {"draft_path": str(path), "draft_digest": digest_json(draft), "revision": normalized["revision"]}

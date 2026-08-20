@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .contracts import digest_json
+from .contracts import ContractError, decode_lock, digest_json, load_json, workflow_directory
 from .ledger import Ledger, utc_now
 
 
@@ -192,12 +192,18 @@ class HookRuntime:
         with self.ledger.connect() as connection:
             runs = [run for run in self._active_runs(connection, payload) if run["mode"] == "guarded"]
             for run in runs:
-                lock_path = Path(run["repository"]) / ".codex" / "workflows" / run["workflow_id"] / "workflow.lock.json"
                 try:
-                    lock = json.loads(lock_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    return {"decision": "block", "reason": f"Guarded run {run['run_id']} cannot finish because its lock is unavailable."}
-                required = {node["id"] for node in lock.get("nodes", []) if node.get("required")}
+                    lock_path = workflow_directory(Path(run["repository"]), run["workflow_id"]) / "workflow.lock.json"
+                    lock = decode_lock(load_json(lock_path))
+                except (ContractError, OSError):
+                    return {"decision": "block", "reason": f"Guarded run {run['run_id']} cannot finish because its lock is invalid or unavailable."}
+                if (
+                    lock["workflow_id"] != run["workflow_id"]
+                    or lock["lock_digest"] != run["lock_digest"]
+                    or lock["revision"] != run["revision"]
+                ):
+                    return {"decision": "block", "reason": f"Guarded run {run['run_id']} cannot finish because its lock no longer matches the run authority."}
+                required = {node["id"] for node in lock["nodes"] if node["required"]}
                 rows = connection.execute("SELECT node_id, status FROM node_states WHERE run_id = ?", (run["run_id"],)).fetchall()
                 statuses = {row["node_id"]: row["status"] for row in rows}
                 incomplete = sorted(node_id for node_id in required if statuses.get(node_id) not in {"completed", "skipped"})

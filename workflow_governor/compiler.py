@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import tempfile
 import tomllib
 from collections import defaultdict, deque
 from pathlib import Path
@@ -16,7 +19,8 @@ from .contracts import (
     digest_bytes,
     digest_json,
     load_json,
-    write_json,
+    validate_identifier,
+    workflow_directory,
 )
 
 
@@ -343,23 +347,61 @@ def render_workflow(lock_values: Iterable[dict[str, Any]]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _write_generated_file(repository: Path, target: Path, payload: bytes) -> None:
+    """Replace one generated file without following a leaf symlink."""
+
+    root = repository.expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    parent = target.parent.resolve()
+    if parent != root and root not in parent.parents:
+        raise ContractError(str(target), "generated-file parent escapes repository")
+    if target.is_symlink():
+        raise ContractError(str(target), "generated-file target must not be a symlink")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=parent)
+    try:
+        os.fchmod(descriptor, 0o644)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, target)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
 def write_generated_views(repository: Path, workflow_id: str, lock: dict[str, Any]) -> None:
-    workflow_dir = repository / ".codex" / "workflows" / workflow_id
-    write_json(workflow_dir / "workflow.lock.json", lock)
-    (workflow_dir / "workflow.mmd").write_text(render_mermaid(lock), encoding="utf-8")
+    workflow_id = validate_identifier(workflow_id, "workflow_id")
+    lock = decode_lock(lock)
+    if lock["workflow_id"] != workflow_id:
+        raise ContractError("workflow_id", "does not match lock.workflow_id")
+    workflow_dir = workflow_directory(repository, workflow_id)
     locks = []
+    replaced = False
     for path in sorted((repository / ".codex" / "workflows").glob("*/workflow.lock.json")):
-        if path == workflow_dir / "workflow.lock.json":
+        if path.parent.resolve() == workflow_dir:
             locks.append(lock)
+            replaced = True
         else:
             locks.append(load_json(path))
-    (repository / "WORKFLOW.md").write_text(render_workflow(locks), encoding="utf-8")
+    if not replaced:
+        locks.append(lock)
+    payloads = {
+        workflow_dir / "workflow.lock.json": (json.dumps(lock, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+        workflow_dir / "workflow.mmd": render_mermaid(lock).encode("utf-8"),
+        repository / "WORKFLOW.md": render_workflow(locks).encode("utf-8"),
+    }
+    for target, payload in payloads.items():
+        _write_generated_file(repository, target, payload)
 
 
 def verify_generated_views(repository: Path, workflow_id: str) -> list[str]:
-    workflow_dir = repository / ".codex" / "workflows" / workflow_id
+    workflow_id = validate_identifier(workflow_id, "workflow_id")
+    workflow_dir = workflow_directory(repository, workflow_id)
     source = load_json(workflow_dir / "workflow.json")
     expected_lock = compile_source(repository, source)
+    if expected_lock["workflow_id"] != workflow_id:
+        raise ContractError("workflow_id", "does not match source.workflow_id")
     actual_lock = load_json(workflow_dir / "workflow.lock.json")
     decode_lock(actual_lock)
     errors: list[str] = []
