@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 — 2026-08-20
+
+### Added
+
+- Added the built-in `adversarial-plugin-review` workflow with independent review lenses, a skeptical finding-challenge pass, strict evidence schemas, and a final release verdict.
+
+### Changed
+
+- Removed the bundled `workflow-governor` and `workflow-governor-maintainer` MCP registrations from the plugin.
+- Removed the bundled lifecycle hook registration from the plugin.
+- Lifecycle MCP tools, when needed, must now be supplied separately from the plugin.
+
 ## 0.3.0 — 2026-08-20
 
 ### Added

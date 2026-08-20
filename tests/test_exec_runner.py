@@ -483,6 +483,38 @@ class ExecutionTests(ExecRunnerTestCase):
 
 
 class WorkflowValidationTests(ExecRunnerTestCase):
+    def test_builtin_adversarial_plugin_review_validates_and_plans(self) -> None:
+        code, stdout, stderr = self.invoke(
+            "workflow", "validate", "builtin:adversarial-plugin-review"
+        )
+        self.assertEqual(code, 0, stderr)
+        validated = json.loads(stdout)
+        self.assertEqual(
+            validated["task_order"],
+            ["attack-surfaces", "challenge-findings", "release-verdict"],
+        )
+
+        plan_code, plan_stdout, plan_stderr = self.invoke(
+            "plan",
+            "builtin:adversarial-plugin-review",
+            "--input",
+            'objective="Review the plugin"',
+            "--input",
+            'review-lenses=["security","packaging","tests"]',
+            "--input",
+            'release-criteria="No release blockers"',
+        )
+        self.assertEqual(plan_code, 0, plan_stderr)
+        plan = json.loads(plan_stdout)
+        self.assertEqual(plan["planned_calls"], 10)
+        self.assertEqual(plan["max_parallel"], 6)
+        self.assertEqual(
+            [task["id"] for task in plan["tasks"]],
+            ["attack-surfaces", "challenge-findings", "release-verdict"],
+        )
+        self.assertEqual(plan["tasks"][0]["fanout_items"], 3)
+        self.assertTrue(all(task["sandbox"] == "read-only" for task in plan["tasks"]))
+
     def test_non_standard_json_input_is_rejected_before_run_persistence(self) -> None:
         workflow = self.write_workflow(
             "numeric-input",

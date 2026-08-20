@@ -1,6 +1,6 @@
 {
   "name": "codex-workflow-governor",
-  "version": "0.3.0+codex.20260820194758",
+  "version": "0.4.0",
   "description": "Govern native-Agent workflows and run reusable asynchronous codex exec graphs",
   "author": {
     "name": "BearsCLOUD",
@@ -39,6 +39,5 @@
       "Complete decision-relevant knowledge graph gaps with provenance.",
       "Review and improve this repository's documentation instructions."
     ]
-  },
-  "mcpServers": "./.mcp.json"
+  }
 }

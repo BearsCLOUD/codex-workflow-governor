@@ -2,7 +2,7 @@
 
 Codex Workflow Governor provides two deliberately separate execution models:
 
-- governed native-Agent workflows with compiled locks, hooks, permits, and MCP lifecycle tools;
+- governed native-Agent workflow definitions whose runtime locks, hooks, permits, and lifecycle tools are supplied separately from this plugin;
 - reusable asynchronous `codex exec` workflows with bounded fan-out, explicit data dependencies, strict JSON outputs, detached execution, and persisted artifacts.
 
 The implementation uses only the Python standard library. It does not require the OpenAI Agents SDK, LangGraph, CrewAI, Temporal, or a web service.
@@ -49,13 +49,21 @@ Each task has a strict root-object JSON Schema. The runner invokes `codex exec -
 
 The graph, readiness, dependency blocking, fan-out item order, and artifact layout are deterministic for fixed workflow files and inputs. Model text and semantics are not deterministic.
 
+The built-in `adversarial-plugin-review` template runs independent read-only review lenses, challenges candidate findings against repository evidence, and produces a risk-ranked release verdict. Start with its supplied example inputs:
+
+```bash
+python3 "$CLI" --project-root "$PROJECT" workflow validate builtin:adversarial-plugin-review
+python3 "$CLI" --project-root "$PROJECT" plan builtin:adversarial-plugin-review \
+  --inputs skills/codex-workflows/assets/workflows/adversarial-plugin-review/example-inputs.json
+```
+
 See [`skills/codex-workflows/SKILL.md`](skills/codex-workflows/SKILL.md) for the calling-agent method and [`workflow-format.md`](skills/codex-workflows/references/workflow-format.md) for the contract.
 
 ## Governed native-Agent workflows
 
 Governed source graphs live under `.codex/workflows/<workflow-id>/workflow.json`. Apply creates an immutable `workflow.lock.json`, generated Mermaid and Markdown views, and verified role files. Drafts, permits, results, and run state stay under `PLUGIN_DATA`.
 
-The explicit lifecycle skills are `workflow-create`, `workflow-check`, `workflow-analyze`, `workflow-update`, `workflow-apply`, `workflow-visualize`, and `workflow-run`. Guarded execution is reported only when trusted hooks and native dispatch inputs are observable; otherwise the runtime records the run as advisory.
+The explicit lifecycle skills are `workflow-create`, `workflow-check`, `workflow-analyze`, `workflow-update`, `workflow-apply`, `workflow-visualize`, and `workflow-run`. This plugin does not register lifecycle hooks. When the lifecycle runtime and trusted hooks are supplied separately, guarded execution is reported only while native dispatch inputs are observable; otherwise the runtime records the run as advisory.
 
 The async exec format is not a silent reinterpretation of the governed v1 lock format. Choose one backend for one workflow.
 
@@ -66,7 +74,7 @@ The async exec format is not a silent reinterpretation of the governed v1 lock f
 
 ## Security
 
-The reader MCP surface is read-only. The maintainer surface can mutate repository and runtime state and should be used only for an explicit user-requested lifecycle action. Workflow IDs and generated paths are contained, guarded stops revalidate lock authority, and private runtime state uses `0700` directories and `0600` files.
+This plugin does not register MCP servers or lifecycle hooks. If the native-Agent lifecycle runtime is supplied separately, its reader surface should remain read-only and its maintainer surface should be used only for an explicit user-requested lifecycle action. Workflow IDs and generated paths are contained, guarded stops revalidate lock authority, and private runtime state uses `0700` directories and `0600` files.
 
 `allowed_paths` in native dispatch packets is compliance metadata, not an operating-system filesystem sandbox. Use the Codex sandbox and operating-system isolation as the enforcement boundary.
 

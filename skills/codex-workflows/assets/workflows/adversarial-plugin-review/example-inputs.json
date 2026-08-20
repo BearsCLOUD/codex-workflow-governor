@@ -1,0 +1,12 @@
+{
+  "objective": "Determine whether this Codex plugin is ready for release and identify concrete blockers with file-level evidence.",
+  "review-lenses": [
+    "Plugin packaging and manifest correctness, including install, update, cache, and discovery behavior",
+    "Security boundaries, untrusted input handling, path containment, permissions, and destructive operations",
+    "Workflow contracts, dependency correctness, failure propagation, cancellation, retries, and persisted state",
+    "Skill instructions, product behavior, documentation accuracy, and mismatch between advertised and implemented capabilities",
+    "Test quality, missing adversarial cases, false-green risks, and runtime behavior not exercised by tests",
+    "Release engineering, version consistency, changelog accuracy, portability, and clean-install behavior"
+  ],
+  "release-criteria": "No critical or high-confidence high-severity defects; plugin manifest and packaged assets validate; documented commands match runtime behavior; security boundaries fail closed; tests cover core success and failure paths."
+}
