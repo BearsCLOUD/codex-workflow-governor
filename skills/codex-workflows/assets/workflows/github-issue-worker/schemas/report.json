@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["completed", "partial", "blocked"]},
+    "triaged": {"type": "integer"},
+    "summary": {"type": "string"},
+    "unauthorized_mutations_blocked": {"type": "boolean", "enum": [true]}
+  },
+  "required": ["status", "triaged", "summary", "unauthorized_mutations_blocked"],
+  "additionalProperties": false
+}

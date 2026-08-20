@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "version": {"type": "string"},
+          "content": {"type": "string"}
+        },
+        "required": ["id", "version", "content"],
+        "additionalProperties": false
+      }
+    },
+    "next_cursor": {"type": "string"}
+  },
+  "required": ["items", "next_cursor"],
+  "additionalProperties": false
+}

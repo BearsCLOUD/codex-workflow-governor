@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0 — 2026-08-20
+
+### Added
+
+- Added explicit `until-cancelled` workflows whose supervisor runs bounded acyclic DAG cycles without retaining an interactive caller.
+- Added durable hash-chained `state.jsonl`, generated `STATE.md`, atomic cursor checkpoints, cross-cycle fan-out idempotency keys, restart recovery, deterministic jitter, exponential backoff, and a consecutive-failure circuit breaker.
+- Added race-safe `tail`, `pause`, `resume`, and graceful `cancel` lifecycle commands plus single-instance enforcement for each project/workflow/instance key.
+- Added read-only `loop-monitor` and `github-issue-worker` built-ins with external mutations denied by default.
+
+### Security
+
+- Persistent write-capable tasks now require explicit `git-worktree` isolation as well as the existing sandbox opt-in; loop permissions are fixed in workflow configuration and injected into every cycle's developer instructions.
+- Lifecycle projections redact recognizable credentials, validate ordered event digests, and detect corrupt or truncated JSONL tails.
+
 ## 0.5.1 — 2026-08-20
 
 ### Fixed

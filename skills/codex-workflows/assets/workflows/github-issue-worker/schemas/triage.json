@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "issue_number": {"type": "integer"},
+    "classification": {"type": "string", "enum": ["bug", "feature", "question", "blocked", "invalid"]},
+    "summary": {"type": "string"},
+    "recommended_action": {"type": "string"},
+    "authorized_mutation": {"type": "boolean", "enum": [false]}
+  },
+  "required": ["issue_number", "classification", "summary", "recommended_action", "authorized_mutation"],
+  "additionalProperties": false
+}

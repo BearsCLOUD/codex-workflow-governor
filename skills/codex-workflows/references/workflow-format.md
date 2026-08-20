@@ -24,7 +24,7 @@ Use lower-case hyphenated workflow, task, and input identifiers. Schema paths mu
 
 ## Contract
 
-`workflow.json` supports `codex-exec-workflow.v1` and `codex-exec-workflow.v2`. Version 1 remains unchanged:
+`workflow.json` supports `codex-exec-workflow.v1` and `codex-exec-workflow.v2`. A finite version 1 workflow has this shape:
 
 ```json
 {
@@ -60,7 +60,7 @@ Use lower-case hyphenated workflow, task, and input identifiers. Schema paths mu
 }
 ```
 
-Required workflow fields are exactly `schema_version`, `workflow_id`, `description`, `max_parallel`, `inputs`, and `tasks`. Supported input types are `string`, `integer`, `number`, `boolean`, `object`, `array`, and `null`.
+Required base workflow fields are exactly `schema_version`, `workflow_id`, `description`, `max_parallel`, `inputs`, and `tasks`. Either version may add the optional root `loop` object documented in [loop-workflows.md](loop-workflows.md). No loop is inferred when that field is absent. Supported input types are `string`, `integer`, `number`, `boolean`, `object`, `array`, and `null`.
 
 Version 2 adds one required root field, `agents`, and lets tasks select a pinned project role:
 
@@ -108,10 +108,12 @@ Every task requires `id`, `depends_on`, `prompt`, and `output_schema`. Optional 
 - `cwd`: project-relative task working directory;
 - `timeout_seconds`: positive integer; defaults to `1800`;
 - `retries`: integer from `0` to `10`; defaults to `0`.
+- `idempotency_key`: fan-out-only template used to deduplicate the same logical item across persistent-loop restarts and cycles; required on loop fan-out tasks;
+- `write_isolation`: currently only `git-worktree`; required for every write-capable task in a persistent loop.
 
 Global concurrency is bounded by workflow `max_parallel` or the run-time `--max-parallel` override, each from `1` to `128`. A workflow may declare at most 256 tasks. `plan` and `run` also enforce a conservative model-call budget: `5000` by default and at most `100000` through an explicit `--max-calls` override. For a dependent fan-out whose predecessor output is not yet known, the plan uses that task's `max_items` bound.
 
-Write-capable tasks are rejected at run time unless the caller explicitly supplies `--allow-workspace-write` or `--allow-danger-full-access`. Such tasks are serialized project-wide, including across runs, but separate worktrees are still required when independent writers must not share files.
+Write-capable tasks are rejected at run time unless the caller explicitly supplies `--allow-workspace-write` or `--allow-danger-full-access`. Such tasks are serialized project-wide, including across runs. Persistent loops additionally reject write-capable tasks without `write_isolation: git-worktree`; the supervisor creates one detached worktree per cycle and keeps it with retained cycle artifacts.
 
 ## Templates and dependencies
 
@@ -121,6 +123,8 @@ Supported expressions are:
 - `{{ tasks.task-id.output }}` and nested output paths;
 - `{{ item }}` or the configured `item_name` inside a fan-out prompt;
 - `{{ index }}` for the zero-based fan-out index.
+
+An `idempotency_key` uses the same local fan-out expressions and must contain at least one placeholder, for example `{{ issue.number }}:{{ issue.updated_at }}`. Reusing a key with different input bytes is a contract failure rather than a silent cache hit.
 
 Non-string values are rendered as sorted JSON. Nested paths on primitive inputs are rejected while loading; nested object/list input paths are resolved against the real inputs during `plan` and `run`. A task may reference only outputs of declared transitive dependencies, and declared output-field paths are checked against the producer schema. Every referenced task must therefore appear on a `depends_on` path. Cycles, unknown dependencies, duplicate IDs, malformed paths, and references to nondependencies fail validation.
 
@@ -186,13 +190,24 @@ Runs are stored below `PLUGIN_DATA` when set, otherwise below `~/.codex/workflow
 
 `run.json` also records every resolved agent pin. The workflow digest covers `workflow.json`, referenced schemas, and agent snapshot bytes. Agent drift is checked again from the run snapshot before workers start.
 
+Persistent runs additionally record:
+
+- append-only, ordered, digest-chained `state.jsonl` lifecycle and cycle events;
+- atomically generated `STATE.md`, rebuilt from durable events and checkpoint state;
+- atomic `checkpoint.json` containing the last successfully committed cursor;
+- atomic `idempotency.json` containing declared fan-out key results;
+- `control.json` for race-safe desired lifecycle state;
+- `cycles/NNNNNN/` finite-run artifacts and, for authorized writers, an isolated worktree.
+
+A truncated JSONL tail, invalid JSON, non-monotonic sequence, or broken event digest chain blocks status and resume. Retention removes only old cycle directories after the configured count; it never compacts `state.jsonl`, `checkpoint.json`, or active idempotency state.
+
 ### Terminal attempt reconciliation
 
 The supervisor records `last_worker_heartbeat`, `last_event_at`, `terminal_event_at`, `process_exit_at`, `output_valid_at`, `output_validation_state`, `failure_reason`, `reconciliation_reason`, `attempt`, and `next_action` in task status. Terminal turn events start a bounded two-second grace period for output flushing. A valid strict output written during that period completes normally; otherwise the full recorded process group is terminated and the attempt becomes a distinct missing, malformed, or schema-invalid failure before bounded retry handling continues.
 
 If a supervisor process stops while `run.json` is still `running`, a new worker may resume under the same exclusive `worker.lock`. It reconstructs completed outputs, reconciles a durable running attempt, terminates a recorded orphan group, and advances only to the next unconsumed attempt. Each decision is appended as `attempt.reconciled` in `events.jsonl`. Set `CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS` to a value from `0.05` to `60` only when a host or test fixture needs a non-default grace.
 
-Use the same exact `--project-root` for `run`, `status`, `wait`, `result`, and `cancel`, because run lookup is project-scoped. Use these commands rather than depending on storage internals. `wait` exit `2` means its monitoring timeout elapsed and requires another status check. Use artifacts for diagnosis and audit; do not edit them to change run truth.
+Use the same exact `--project-root` for `run`, `status`, `wait`, `result`, `tail`, `pause`, `resume`, and `cancel`, because run lookup is project-scoped. Use these commands rather than depending on storage internals. `wait` exit `2` means its monitoring timeout elapsed and requires another status check. Use artifacts for diagnosis and audit; do not edit them to change run truth.
 
 Run directories and files are created with private user permissions, but their contents remain sensitive local data. Do not put API keys, credentials, or unnecessary personal data in inputs or prompts because snapshots, rendered prompts, stderr, events, and outputs are intentionally retained.
 

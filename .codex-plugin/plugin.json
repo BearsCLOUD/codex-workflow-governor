@@ -1,7 +1,7 @@
 {
   "name": "codex-workflow-governor",
-  "version": "0.5.1",
-  "description": "Govern native-Agent workflows and run reusable asynchronous codex exec graphs",
+  "version": "0.6.0",
+  "description": "Govern native-Agent workflows and run reusable asynchronous or persistent codex exec graphs",
   "author": {
     "name": "BearsCLOUD",
     "url": "https://github.com/BearsCLOUD"
@@ -23,7 +23,7 @@
   "interface": {
     "displayName": "Codex Workflow Governor",
     "shortDescription": "Govern agents and run async Codex task graphs.",
-    "longDescription": "Create and govern compiled native-Agent workflows or run reusable asynchronous codex exec graphs with bounded concurrency, explicit dependencies, strict structured outputs, monitoring, and persisted results.",
+    "longDescription": "Create and govern compiled native-Agent workflows or run reusable asynchronous and explicitly persistent codex exec graphs with bounded concurrency, dependencies, strict outputs, checkpoints, monitoring, and persisted results.",
     "developerName": "BearsCLOUD",
     "category": "Development",
     "capabilities": [
@@ -35,6 +35,7 @@
       "Check the selected workflow and explain any drift.",
       "Run a guarded workflow by its workflow ID.",
       "Analyze many independent items asynchronously and synthesize a structured result.",
+      "Run a bounded persistent monitor until it is explicitly paused or cancelled.",
       "Deepen an incomplete evidence synthesis through targeted waves.",
       "Complete decision-relevant knowledge graph gaps with provenance.",
       "Review and improve this repository's documentation instructions."

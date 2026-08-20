@@ -1,0 +1,5 @@
+{
+  "cursor": "initial",
+  "instance": "example-monitor",
+  "request": "Monitor the named read-only source and summarize newly discovered records."
+}

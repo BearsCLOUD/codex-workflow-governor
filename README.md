@@ -3,7 +3,7 @@
 Codex Workflow Governor provides two deliberately separate execution models:
 
 - governed native-Agent workflow definitions whose runtime locks, hooks, permits, and lifecycle tools are supplied separately from this plugin;
-- reusable asynchronous `codex exec` workflows with bounded fan-out, explicit data dependencies, strict JSON outputs, detached execution, and persisted artifacts.
+- reusable asynchronous `codex exec` workflows with bounded fan-out, explicit data dependencies, strict JSON outputs, detached execution, persisted artifacts, and explicitly configured recurring loops.
 
 The implementation uses only the Python standard library. It does not require the OpenAI Agents SDK, LangGraph, CrewAI, Temporal, or a web service.
 
@@ -37,6 +37,22 @@ python3 "$CLI" --project-root "$PROJECT" result RUN_ID
 python3 "$CLI" --project-root "$PROJECT" cancel RUN_ID
 ```
 
+An explicit `loop.mode=until-cancelled` turns the same validated acyclic DAG into bounded recurring cycles. It must run detached; the supervisor owns scheduling and recovery after the caller receives the run ID. Use the loop lifecycle commands instead of polling from an interactive agent:
+
+```bash
+python3 "$CLI" --project-root "$PROJECT" workflow validate builtin:github-issue-worker
+python3 "$CLI" --project-root "$PROJECT" plan builtin:github-issue-worker \
+  --inputs skills/codex-workflows/assets/workflows/github-issue-worker/example-inputs.json
+python3 "$CLI" --project-root "$PROJECT" run builtin:github-issue-worker \
+  --inputs skills/codex-workflows/assets/workflows/github-issue-worker/example-inputs.json --detach
+python3 "$CLI" --project-root "$PROJECT" tail RUN_ID --follow
+python3 "$CLI" --project-root "$PROJECT" pause RUN_ID
+python3 "$CLI" --project-root "$PROJECT" resume RUN_ID
+python3 "$CLI" --project-root "$PROJECT" cancel RUN_ID
+```
+
+Each loop cycle has its own call and wall-clock bounds. The supervisor commits the cursor only after the complete cycle succeeds, caches declared fan-out idempotency keys before advancing, applies deterministic jitter and bounded backoff, and opens a circuit after repeated failures. Only one active run may own the same project/workflow/instance key. `state.jsonl` is an ordered, hash-chained audit log; `STATE.md` is an atomic generated operator projection that `status` can rebuild. `loop-monitor` is the generic template. `github-issue-worker` discovers and triages issues read-only; it cannot comment, close, push, open or merge PRs, or delete branches unless a copied workflow is explicitly changed and revalidated.
+
 Reusable workflow scopes are:
 
 - project: `.codex/exec-workflows/<name>/`;
@@ -47,7 +63,7 @@ Each task has a strict root-object JSON Schema. The runner invokes `codex exec -
 
 The supervisor watches Codex JSONL events while the child is live. After `turn.completed`, `turn.failed`, or `turn.cancelled`, it allows a two-second output-flush grace period, then reconciles the terminal event, process group, exit state, and strict final output. Missing, malformed, and schema-invalid outputs receive distinct stable failure metadata; retries remain bounded by the task contract. A restarted worker resumes durable attempt state, cleans up recorded orphan process groups, and cannot consume the same retry twice. `CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS` may set a bounded `0.05`–`60` second grace for testing or host-specific flushing.
 
-`plan` discloses the workflow digest, sandbox, working directory, model settings, timeouts, retries, fan-out bounds, and conservative call count. The default budget is 5000 model calls; higher budgets and write-capable sandboxes require explicit command-line opt-ins. Persisted inputs and artifacts may contain sensitive data, so do not pass credentials or unnecessary personal information.
+`plan` discloses the workflow digest, sandbox, working directory, model settings, timeouts, retries, fan-out bounds, and conservative call count. For persistent loops it reports a per-cycle cost model and correctly describes the total as unbounded until cancellation. The default budget is 5000 model calls; higher budgets and write-capable sandboxes require explicit command-line opt-ins. Persistent write tasks additionally require declared `git-worktree` isolation. Persisted inputs and artifacts may contain sensitive data, so do not pass credentials or unnecessary personal information.
 
 The graph, readiness, dependency blocking, fan-out item order, and artifact layout are deterministic for fixed workflow files and inputs. Model text and semantics are not deterministic.
 
@@ -77,7 +93,7 @@ python3 "$CLI" --project-root "$PROJECT" plan project:adversarial-plugin-review 
   --inputs .codex/exec-workflows/adversarial-plugin-review/example-inputs.json
 ```
 
-See [`skills/codex-workflows/SKILL.md`](skills/codex-workflows/SKILL.md) for the calling-agent method and [`workflow-format.md`](skills/codex-workflows/references/workflow-format.md) for the contract.
+See [`skills/codex-workflows/SKILL.md`](skills/codex-workflows/SKILL.md) for the calling-agent method, [`workflow-format.md`](skills/codex-workflows/references/workflow-format.md) for the base contract, and [`loop-workflows.md`](skills/codex-workflows/references/loop-workflows.md) for recurring lifecycle and recovery semantics.
 
 ## Governed native-Agent workflows
 

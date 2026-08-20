@@ -47,6 +47,18 @@ def classify(prompt: str) -> dict[str, object]:
         return {"kind": "failure"}
     if prompt.startswith("MALFORMED"):
         return {"kind": "malformed"}
+    match = re.search(r"LOOP-DISCOVER cursor=([^\n]*)", prompt)
+    if match:
+        return {"kind": "loop-discover", "cursor": match.group(1).strip()}
+    if prompt.startswith("LOOP-PROCESS"):
+        return {"kind": "loop-process"}
+    if prompt.startswith("Read GitHub issues matching"):
+        match = re.search(r"Cursor: ([^\n]*)", prompt)
+        return {"kind": "github-discover", "cursor": match.group(1).strip() if match else "0"}
+    if prompt.startswith("Triage this GitHub issue"):
+        return {"kind": "github-triage"}
+    if prompt.startswith("Produce a read-only operator report"):
+        return {"kind": "github-report"}
     for kind in (
         "terminal-missing",
         "terminal-malformed",
@@ -139,6 +151,42 @@ try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
         final_path.write_text("{this is not json", encoding="utf-8")
         raise SystemExit(0)
+    elif identity["kind"] == "loop-discover":
+        cursor = str(identity.get("cursor") or "0")
+        next_cursor = str(int(cursor) + 1)
+        output = {
+            "items": [{"id": "issue-1", "updated_at": "1"}],
+            "next_cursor": next_cursor,
+        }
+    elif identity["kind"] == "loop-process":
+        output = {"ok": True}
+    elif identity["kind"] == "github-discover":
+        cursor = str(identity.get("cursor") or "0")
+        output = {
+            "issues": [{
+                "number": 7,
+                "title": "Fixture issue",
+                "body": "Fixture body",
+                "url": "https://example.invalid/issues/7",
+                "updated_at": "2026-08-20T00:00:00Z",
+            }],
+            "next_cursor": str(int(cursor) + 1),
+        }
+    elif identity["kind"] == "github-triage":
+        output = {
+            "issue_number": 7,
+            "classification": "bug",
+            "summary": "Fixture triage",
+            "recommended_action": "Review manually",
+            "authorized_mutation": False,
+        }
+    elif identity["kind"] == "github-report":
+        output = {
+            "status": "completed",
+            "triaged": 1,
+            "summary": "Fixture report",
+            "unauthorized_mutations_blocked": True,
+        }
     elif identity["kind"] == "healthy-events":
         for index in range(6):
             print(json.dumps({"type": "item.updated", "index": index}), flush=True)
@@ -199,6 +247,27 @@ SYNTHESIS_SCHEMA = {
     "additionalProperties": False,
 }
 
+LOOP_DISCOVERY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "updated_at": {"type": "string"},
+                },
+                "required": ["id", "updated_at"],
+                "additionalProperties": False,
+            },
+        },
+        "next_cursor": {"type": "string"},
+    },
+    "required": ["items", "next_cursor"],
+    "additionalProperties": False,
+}
+
 
 def process_is_live(pid: int) -> bool:
     try:
@@ -242,6 +311,7 @@ class ExecRunnerTestCase(unittest.TestCase):
         *,
         inputs: dict[str, str] | None = None,
         max_parallel: int = 3,
+        loop: dict[str, object] | None = None,
     ) -> Path:
         directory = self.project / ".codex" / "exec-workflows" / name
         (directory / "schemas").mkdir(parents=True)
@@ -257,6 +327,8 @@ class ExecRunnerTestCase(unittest.TestCase):
             "inputs": inputs or {},
             "tasks": tasks,
         }
+        if loop is not None:
+            workflow["loop"] = loop
         (directory / "workflow.json").write_text(
             json.dumps(workflow), encoding="utf-8"
         )
@@ -974,6 +1046,602 @@ class WorkflowValidationTests(ExecRunnerTestCase):
 
         with self.assertRaisesRegex(ContractError, "unsupported schema keywords: minLength"):
             load_workflow(workflow / "workflow.json")
+
+
+class LoopWorkflowTests(ExecRunnerTestCase):
+    def loop_config(self, *, max_failures: int = 3) -> dict[str, object]:
+        return {
+            "mode": "until-cancelled",
+            "interval_seconds": 5,
+            "jitter_seconds": 0,
+            "backoff": "exponential",
+            "max_backoff_seconds": 60,
+            "max_calls_per_cycle": 10,
+            "max_cycle_seconds": 30,
+            "max_consecutive_failures": max_failures,
+            "cursor": "tasks.discover.output.next_cursor",
+            "cursor_input": "cursor",
+            "instance_key": "fixture:{{ inputs.source }}",
+            "retain_cycles": 5,
+            "permissions": {},
+        }
+
+    def write_loop(self, name: str, *, failing_tail: bool = False, max_failures: int = 3) -> Path:
+        tasks: list[dict[str, object]] = [
+            {
+                "id": "discover",
+                "depends_on": [],
+                "prompt": "LOOP-DISCOVER cursor={{ inputs.cursor }}",
+                "output_schema": "schemas/discovery.json",
+                "sandbox": "read-only",
+            },
+            {
+                "id": "process",
+                "depends_on": ["discover"],
+                "foreach": "tasks.discover.output.items",
+                "item_name": "issue",
+                "idempotency_key": "{{ issue.id }}:{{ issue.updated_at }}",
+                "max_items": 3,
+                "prompt": "LOOP-PROCESS {{ issue.id }}:{{ issue.updated_at }}",
+                "output_schema": "schemas/out.json",
+                "sandbox": "read-only",
+            },
+        ]
+        if failing_tail:
+            tasks.append(
+                {
+                    "id": "finish",
+                    "depends_on": ["process"],
+                    "prompt": "FAIL cycle after durable item completion",
+                    "output_schema": "schemas/out.json",
+                    "sandbox": "read-only",
+                }
+            )
+        return self.write_workflow(
+            name,
+            tasks,
+            {"discovery": LOOP_DISCOVERY_SCHEMA, "out": OBJECT_SCHEMA},
+            inputs={"cursor": "string", "source": "string"},
+            loop=self.loop_config(max_failures=max_failures),
+        )
+
+    def test_loop_contract_plan_and_write_isolation_validation(self) -> None:
+        workflow = self.write_loop("loop-plan")
+
+        code, stdout, stderr = self.invoke(
+            "plan",
+            str(workflow),
+            "--input",
+            'cursor="0"',
+            "--input",
+            'source="fixture"',
+        )
+
+        self.assertEqual(code, 0, stderr)
+        plan = json.loads(stdout)
+        self.assertIsNone(plan["planned_calls"])
+        self.assertTrue(plan["loop"]["persistent"])
+        self.assertEqual(plan["loop"]["planned_calls_per_cycle"], 4)
+        self.assertEqual(
+            plan["loop"]["cost_model"]["total_calls"],
+            "unbounded-until-cancelled",
+        )
+        self.assertEqual(plan["loop"]["permissions"]["close_issues"], False)
+
+        raw = json.loads((workflow / "workflow.json").read_text(encoding="utf-8"))
+        raw["tasks"][1]["sandbox"] = "workspace-write"
+        (workflow / "workflow.json").write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaisesRegex(ContractError, "git-worktree"):
+            load_workflow(workflow / "workflow.json", self.project)
+        raw["tasks"][1]["sandbox"] = "read-only"
+        raw["tasks"][1].pop("idempotency_key")
+        (workflow / "workflow.json").write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaisesRegex(ContractError, "require an idempotency key"):
+            load_workflow(workflow / "workflow.json", self.project)
+
+    def test_bundled_monitors_validate_install_and_deny_mutations(self) -> None:
+        for name in ("loop-monitor", "github-issue-worker"):
+            with self.subTest(name=name):
+                validate_code, _, validate_stderr = self.invoke(
+                    "workflow", "validate", f"builtin:{name}"
+                )
+                self.assertEqual(validate_code, 0, validate_stderr)
+        inputs = (
+            Path(__file__).resolve().parent.parent
+            / "skills/codex-workflows/assets/workflows/github-issue-worker/example-inputs.json"
+        )
+        plan_code, plan_stdout, plan_stderr = self.invoke(
+            "plan", "builtin:github-issue-worker", "--inputs", str(inputs)
+        )
+        self.assertEqual(plan_code, 0, plan_stderr)
+        plan = json.loads(plan_stdout)
+        self.assertTrue(all(value is False for value in plan["loop"]["permissions"].values()))
+        self.assertTrue(all(task["sandbox"] == "read-only" for task in plan["tasks"]))
+
+        install_code, _, install_stderr = self.invoke(
+            "workflow",
+            "install",
+            "builtin:github-issue-worker",
+            "--name",
+            "project-issue-worker",
+            "--json",
+        )
+        self.assertEqual(install_code, 0, install_stderr)
+        installed_code, _, installed_stderr = self.invoke(
+            "workflow", "validate", "project:project-issue-worker"
+        )
+        self.assertEqual(installed_code, 0, installed_stderr)
+        self.assertTrue(
+            (
+                self.project
+                / ".codex/exec-workflows/project-issue-worker/example-inputs.json"
+            ).is_file()
+        )
+        installed_root = (
+            self.project / ".codex/exec-workflows/project-issue-worker"
+        )
+        self.assertEqual(
+            sorted(
+                path.relative_to(installed_root).as_posix()
+                for path in installed_root.rglob("*")
+                if path.is_file()
+            ),
+            [
+                "example-inputs.json",
+                "schemas/issues.json",
+                "schemas/report.json",
+                "schemas/triage.json",
+                "workflow.json",
+            ],
+        )
+
+    def test_persistent_writer_runs_in_isolated_git_worktree(self) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.project), "init", "-q"], check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(self.project), "config", "user.email", "test@example.invalid"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.project), "config", "user.name", "Test"], check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(self.project), "commit", "--allow-empty", "-qm", "initial"],
+            check=True,
+        )
+        workflow = self.write_loop("loop-writer")
+        raw = json.loads((workflow / "workflow.json").read_text(encoding="utf-8"))
+        raw["tasks"][1].update(
+            {"sandbox": "workspace-write", "write_isolation": "git-worktree"}
+        )
+        (workflow / "workflow.json").write_text(json.dumps(raw), encoding="utf-8")
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            code, _, stderr = self.invoke(
+                "run",
+                str(workflow),
+                "--input",
+                'cursor="0"',
+                "--input",
+                'source="fixture"',
+                "--codex-bin",
+                str(self.fake_codex),
+                "--allow-workspace-write",
+                "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+
+        async def pause_after_cycle(target: Path, _wake_at: object) -> str:
+            implementation._atomic_json(
+                target / "control.json",
+                {"desired_status": "paused", "updated_at": implementation.utc_now()},
+            )
+            return "paused"
+
+        with patch(
+            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            new=pause_after_cycle,
+        ):
+            self.assertEqual(asyncio.run(execute_run(run_dir)), 0)
+        worktree = run_dir / "cycles" / "000001" / "worktree"
+        self.assertTrue((worktree / ".git").exists())
+        process_call = next(
+            call for call in self.fake_log()["calls"] if call["identity"]["kind"] == "loop-process"
+        )
+        cd_index = process_call["argv"].index("--cd")
+        self.assertEqual(Path(process_call["argv"][cd_index + 1]), worktree)
+        instructions = [
+            value
+            for index, value in enumerate(process_call["argv"])
+            if process_call["argv"][index - 1 : index] == ["--config"]
+        ]
+        self.assertTrue(any("Allowed external mutations: none" in value for value in instructions))
+
+    def test_github_issue_worker_fixture_triages_update_exactly_once(self) -> None:
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            code, _, stderr = self.invoke(
+                "run",
+                "builtin:github-issue-worker",
+                "--input",
+                'cursor="0"',
+                "--input",
+                'query="fixture"',
+                "--input",
+                'repository="owner/repository"',
+                "--codex-bin",
+                str(self.fake_codex),
+                "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        waits = 0
+
+        async def two_cycles_then_pause(target: Path, _wake_at: object) -> str:
+            nonlocal waits
+            waits += 1
+            if waits >= 2:
+                implementation._atomic_json(
+                    target / "control.json",
+                    {"desired_status": "paused", "updated_at": implementation.utc_now()},
+                )
+                return "paused"
+            return "running"
+
+        with patch(
+            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            new=two_cycles_then_pause,
+        ):
+            self.assertEqual(asyncio.run(execute_run(run_dir)), 0)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["checkpoint"]["cursor"], "2")
+        kinds = [entry["kind"] for entry in self.fake_log()["starts"]]
+        self.assertEqual(kinds.count("github-discover"), 2)
+        self.assertEqual(kinds.count("github-triage"), 1)
+        self.assertEqual(kinds.count("github-report"), 2)
+        self.assertTrue(
+            all(
+                call["argv"][call["argv"].index("--sandbox") + 1] == "read-only"
+                for call in self.fake_log()["calls"]
+            )
+        )
+
+    def test_loop_cycles_checkpoint_deduplicate_and_rebuild_projection(self) -> None:
+        workflow = self.write_loop("loop-state")
+        raw_workflow = json.loads(
+            (workflow / "workflow.json").read_text(encoding="utf-8")
+        )
+        raw_workflow["loop"]["retain_cycles"] = 1
+        (workflow / "workflow.json").write_text(
+            json.dumps(raw_workflow), encoding="utf-8"
+        )
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            code, _, stderr = self.invoke(
+                "run",
+                str(workflow),
+                "--input",
+                'cursor="0"',
+                "--input",
+                'source="fixture"',
+                "--codex-bin",
+                str(self.fake_codex),
+                "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        waits = 0
+
+        async def two_cycles_then_pause(target: Path, _wake_at: object) -> str:
+            nonlocal waits
+            waits += 1
+            if waits >= 2:
+                implementation._atomic_json(
+                    target / "control.json",
+                    {"desired_status": "paused", "updated_at": implementation.utc_now()},
+                )
+                return "paused"
+            return "running"
+
+        with patch(
+            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            new=two_cycles_then_pause,
+        ):
+            worker_code = asyncio.run(execute_run(run_dir))
+
+        self.assertEqual(worker_code, 0)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "paused")
+        self.assertEqual(state["last_completed_cycle_id"], 2)
+        self.assertEqual(state["checkpoint"]["cursor"], "2")
+        kinds = [entry["kind"] for entry in self.fake_log()["starts"]]
+        self.assertEqual(kinds.count("loop-discover"), 2)
+        self.assertEqual(kinds.count("loop-process"), 1)
+        idempotency = json.loads((run_dir / "idempotency.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(idempotency["entries"]["process"]), 1)
+        self.assertEqual(
+            [path.name for path in (run_dir / "cycles").iterdir() if path.is_dir()],
+            ["000002"],
+        )
+
+        events = implementation._read_loop_events(run_dir)
+        self.assertEqual(
+            [event["sequence"] for event in events], list(range(1, len(events) + 1))
+        )
+        self.assertTrue(
+            {
+                "run_id",
+                "loop_id",
+                "cycle_id",
+                "workflow_digest",
+                "input_digest",
+                "output_digest",
+                "task_summary",
+                "call_usage",
+                "next_wake_at",
+                "event_digest",
+            }.issubset(events[-1])
+        )
+        self.assertEqual(set(events[-1]["cursor"]), {"sha256"})
+        projection = (run_dir / "STATE.md").read_text(encoding="utf-8")
+        (run_dir / "STATE.md").unlink()
+        status_code, _, status_stderr = self.invoke("status", state["run_id"], "--json")
+        self.assertEqual(status_code, 0, status_stderr)
+        self.assertEqual((run_dir / "STATE.md").read_text(encoding="utf-8"), projection)
+
+        tail_code, tail_stdout, tail_stderr = self.invoke(
+            "tail", state["run_id"], "--lines", "2"
+        )
+        self.assertEqual(tail_code, 0, tail_stderr)
+        self.assertEqual(len(tail_stdout.splitlines()), 2)
+
+        state_log = run_dir / "state.jsonl"
+        original_log = state_log.read_bytes()
+        lines = original_log.decode("utf-8").splitlines()
+        tampered = json.loads(lines[-1])
+        tampered["status"] = "running"
+        lines[-1] = json.dumps(tampered, sort_keys=True)
+        state_log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        digest_code, _, digest_stderr = self.invoke("status", state["run_id"])
+        self.assertEqual(digest_code, 2)
+        self.assertIn("invalid digest", digest_stderr)
+        state_log.write_bytes(original_log)
+
+        with (run_dir / "state.jsonl").open("ab") as handle:
+            handle.write(b'{"truncated":true}')
+        corrupt_code, _, corrupt_stderr = self.invoke("status", state["run_id"])
+        self.assertEqual(corrupt_code, 2)
+        self.assertIn("truncated tail", corrupt_stderr)
+
+    def test_detached_loop_supervisor_continues_without_calling_agent(self) -> None:
+        workflow = self.write_loop("loop-detached")
+        started = time.monotonic()
+        code, stdout, stderr = self.invoke(
+            "run",
+            str(workflow),
+            "--input",
+            'cursor="0"',
+            "--input",
+            'source="fixture"',
+            "--codex-bin",
+            str(self.fake_codex),
+            "--detach",
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertLess(time.monotonic() - started, 2)
+        run_id = stdout.strip()
+        run_dir = self.only_run_dir()
+
+        def stop_worker() -> None:
+            if not (run_dir / "run.json").is_file():
+                return
+            state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            if state.get("status") not in {"cancelled", "failed"}:
+                self.invoke("cancel", run_id)
+                for _ in range(100):
+                    state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                    if state.get("status") in {"cancelled", "failed"}:
+                        break
+                    time.sleep(0.02)
+
+        self.addCleanup(stop_worker)
+        for _ in range(500):
+            state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            if state.get("status") == "sleeping" and state["checkpoint"]["cycle_id"] == 1:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("detached supervisor did not complete its first cycle")
+        cancel_code, _, cancel_stderr = self.invoke("cancel", run_id)
+        self.assertEqual(cancel_code, 0, cancel_stderr)
+        for _ in range(500):
+            state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            if state.get("status") == "cancelled":
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("detached supervisor did not observe cancellation")
+        self.assertTrue((run_dir / "STATE.md").is_file())
+
+    def test_partial_cycle_failure_reuses_item_and_opens_circuit(self) -> None:
+        workflow = self.write_loop("loop-circuit", failing_tail=True, max_failures=2)
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            code, _, stderr = self.invoke(
+                "run",
+                str(workflow),
+                "--input",
+                'cursor="0"',
+                "--input",
+                'source="fixture"',
+                "--codex-bin",
+                str(self.fake_codex),
+                "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+
+        async def immediate(_target: Path, _wake_at: object) -> str:
+            return "running"
+
+        with patch(
+            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            new=immediate,
+        ):
+            worker_code = asyncio.run(execute_run(run_dir))
+
+        self.assertEqual(worker_code, 1)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "circuit-open")
+        self.assertEqual(state["consecutive_failures"], 2)
+        self.assertEqual(state["checkpoint"]["cycle_id"], 0)
+        kinds = [entry["kind"] for entry in self.fake_log()["starts"]]
+        self.assertEqual(kinds.count("loop-process"), 1)
+        self.assertEqual(kinds.count("failure"), 2)
+
+    def test_cycle_timeout_stops_process_group_and_opens_circuit(self) -> None:
+        loop = self.loop_config(max_failures=1)
+        loop["max_cycle_seconds"] = 1
+        workflow = self.write_workflow(
+            "loop-timeout",
+            [
+                {
+                    "id": "discover",
+                    "depends_on": [],
+                    "prompt": "TERMINAL-DESCENDANT",
+                    "output_schema": "schemas/discovery.json",
+                    "sandbox": "read-only",
+                }
+            ],
+            {"discovery": LOOP_DISCOVERY_SCHEMA},
+            inputs={"cursor": "string", "source": "string"},
+            loop=loop,
+        )
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            code, _, stderr = self.invoke(
+                "run",
+                str(workflow),
+                "--input",
+                'cursor="0"',
+                "--input",
+                'source="fixture"',
+                "--codex-bin",
+                str(self.fake_codex),
+                "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+        started = time.monotonic()
+        self.assertEqual(asyncio.run(execute_run(run_dir)), 1)
+        self.assertLess(time.monotonic() - started, 4)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "circuit-open")
+        self.assertEqual(state["error"], "cycle timeout")
+        child_pids = self.fake_log().get("child_pids", [])
+        self.assertEqual(len(child_pids), 1)
+        for _ in range(100):
+            if not process_is_live(child_pids[0]):
+                break
+            time.sleep(0.02)
+        self.assertFalse(process_is_live(child_pids[0]))
+
+    def test_interrupted_supervisor_resumes_from_committed_cursor(self) -> None:
+        workflow = self.write_loop("loop-restart")
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            code, _, stderr = self.invoke(
+                "run",
+                str(workflow),
+                "--input",
+                'cursor="0"',
+                "--input",
+                'source="fixture"',
+                "--codex-bin",
+                str(self.fake_codex),
+                "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+
+        async def interrupt_after_checkpoint() -> None:
+            worker = asyncio.create_task(execute_run(run_dir))
+            for _ in range(200):
+                state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                if state.get("status") == "sleeping" and state["checkpoint"]["cycle_id"] == 1:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                self.fail("loop did not commit its first checkpoint")
+            worker.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await worker
+
+        asyncio.run(interrupt_after_checkpoint())
+        interrupted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(interrupted["status"], "failed")
+        self.assertEqual(interrupted["checkpoint"]["cursor"], "1")
+
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            resume_code, _, resume_stderr = self.invoke("resume", interrupted["run_id"])
+        self.assertEqual(resume_code, 0, resume_stderr)
+        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+
+        async def pause_after_cycle(target: Path, _wake_at: object) -> str:
+            implementation._atomic_json(
+                target / "control.json",
+                {"desired_status": "paused", "updated_at": implementation.utc_now()},
+            )
+            return "paused"
+
+        with patch(
+            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            new=pause_after_cycle,
+        ):
+            self.assertEqual(asyncio.run(execute_run(run_dir)), 0)
+        resumed = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(resumed["checkpoint"]["cursor"], "2")
+        prompts = [entry["prompt"] for entry in self.fake_log()["calls"]]
+        self.assertTrue(any(prompt.startswith("LOOP-DISCOVER cursor=0") for prompt in prompts))
+        self.assertTrue(any(prompt.startswith("LOOP-DISCOVER cursor=1") for prompt in prompts))
+        kinds = [entry["kind"] for entry in self.fake_log()["starts"]]
+        self.assertEqual(kinds.count("loop-process"), 1)
+
+    def test_instance_collision_and_lifecycle_commands_are_race_safe(self) -> None:
+        workflow = self.write_loop("loop-instance")
+        arguments = (
+            "run",
+            str(workflow),
+            "--input",
+            'cursor="0"',
+            "--input",
+            'source="fixture"',
+            "--codex-bin",
+            str(self.fake_codex),
+            "--detach",
+        )
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            first_code, _, first_stderr = self.invoke(*arguments)
+            second_code, _, second_stderr = self.invoke(*arguments)
+        self.assertEqual(first_code, 0, first_stderr)
+        self.assertEqual(second_code, 2)
+        self.assertIn("already owns instance", second_stderr)
+        run_dir = self.only_run_dir()
+        run_id = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["run_id"]
+
+        pause_code, _, pause_stderr = self.invoke("pause", run_id)
+        self.assertEqual(pause_code, 0, pause_stderr)
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            resume_code, _, resume_stderr = self.invoke("resume", run_id)
+            duplicate_resume_code, _, duplicate_resume_stderr = self.invoke(
+                "resume", run_id
+            )
+        self.assertEqual(resume_code, 0, resume_stderr)
+        self.assertEqual(duplicate_resume_code, 2)
+        self.assertIn("already queued", duplicate_resume_stderr)
+        cancel_code, _, cancel_stderr = self.invoke("cancel", run_id)
+        self.assertEqual(cancel_code, 0, cancel_stderr)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "cancelled")
 
 
 if __name__ == "__main__":

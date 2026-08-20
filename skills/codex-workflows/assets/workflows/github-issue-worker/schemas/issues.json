@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": {"type": "integer"},
+          "title": {"type": "string"},
+          "body": {"type": "string"},
+          "url": {"type": "string"},
+          "updated_at": {"type": "string"}
+        },
+        "required": ["number", "title", "body", "url", "updated_at"],
+        "additionalProperties": false
+      }
+    },
+    "next_cursor": {"type": "string"}
+  },
+  "required": ["issues", "next_cursor"],
+  "additionalProperties": false
+}

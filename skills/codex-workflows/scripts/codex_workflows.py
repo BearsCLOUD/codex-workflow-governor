@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -80,6 +80,19 @@ MAX_FANOUT_ITEMS = 10_000
 MAX_TASKS = 256
 DEFAULT_MAX_CALLS = 5_000
 MAX_CALLS = 100_000
+MIN_LOOP_INTERVAL_SECONDS = 5
+MAX_LOOP_INTERVAL_SECONDS = 86_400
+MAX_LOOP_CYCLE_SECONDS = 86_400
+MAX_LOOP_FAILURES = 100
+MAX_LOOP_RETENTION_CYCLES = 10_000
+LOOP_PERMISSION_NAMES = {
+    "comment_issues",
+    "close_issues",
+    "push",
+    "open_pull_requests",
+    "merge_pull_requests",
+    "delete_branches",
+}
 DEFAULT_TERMINAL_GRACE_SECONDS = 2.0
 ATTEMPT_POLL_SECONDS = 0.05
 WORKER_HEARTBEAT_SECONDS = 1.0
@@ -330,6 +343,123 @@ def _require_keys(value: Mapping[str, Any], path: str, required: set[str], optio
         raise ContractError(path, f"missing fields: {', '.join(missing)}")
     if unknown:
         raise ContractError(path, f"unknown fields: {', '.join(unknown)}")
+
+
+def _bounded_integer(value: Any, path: str, minimum: int, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
+        raise ContractError(path, f"must be an integer from {minimum} to {maximum}")
+    return value
+
+
+def _validate_loop_value(value: Any, inputs: Mapping[str, str]) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ContractError("workflow.loop", "must be an object")
+    required = {
+        "mode",
+        "interval_seconds",
+        "max_calls_per_cycle",
+        "max_cycle_seconds",
+        "max_consecutive_failures",
+        "cursor",
+    }
+    optional = {
+        "jitter_seconds",
+        "backoff",
+        "max_backoff_seconds",
+        "cursor_input",
+        "instance_key",
+        "retain_cycles",
+        "permissions",
+    }
+    _require_keys(value, "workflow.loop", required, optional)
+    if value["mode"] != "until-cancelled":
+        raise ContractError("workflow.loop.mode", "must be 'until-cancelled'")
+    interval = _bounded_integer(
+        value["interval_seconds"],
+        "workflow.loop.interval_seconds",
+        MIN_LOOP_INTERVAL_SECONDS,
+        MAX_LOOP_INTERVAL_SECONDS,
+    )
+    jitter = _bounded_integer(
+        value.get("jitter_seconds", 0),
+        "workflow.loop.jitter_seconds",
+        0,
+        MAX_LOOP_INTERVAL_SECONDS,
+    )
+    if jitter > interval:
+        raise ContractError("workflow.loop.jitter_seconds", "must not exceed interval_seconds")
+    backoff = value.get("backoff", "exponential")
+    if backoff not in {"constant", "exponential"}:
+        raise ContractError("workflow.loop.backoff", "must be 'constant' or 'exponential'")
+    max_backoff = _bounded_integer(
+        value.get("max_backoff_seconds", max(interval, 3600)),
+        "workflow.loop.max_backoff_seconds",
+        interval,
+        MAX_LOOP_INTERVAL_SECONDS,
+    )
+    max_calls = _bounded_integer(
+        value["max_calls_per_cycle"],
+        "workflow.loop.max_calls_per_cycle",
+        1,
+        MAX_CALLS,
+    )
+    max_cycle = _bounded_integer(
+        value["max_cycle_seconds"],
+        "workflow.loop.max_cycle_seconds",
+        1,
+        MAX_LOOP_CYCLE_SECONDS,
+    )
+    max_failures = _bounded_integer(
+        value["max_consecutive_failures"],
+        "workflow.loop.max_consecutive_failures",
+        1,
+        MAX_LOOP_FAILURES,
+    )
+    cursor = value["cursor"]
+    if not isinstance(cursor, str) or not cursor.startswith("tasks."):
+        raise ContractError("workflow.loop.cursor", "must be a task output data path")
+    cursor_input = value.get("cursor_input")
+    if cursor_input is not None:
+        if not isinstance(cursor_input, str) or cursor_input not in inputs:
+            raise ContractError("workflow.loop.cursor_input", "must name a declared workflow input")
+    elif "cursor" in inputs:
+        cursor_input = "cursor"
+    instance_key = value.get("instance_key", "default")
+    if not isinstance(instance_key, str) or not instance_key.strip():
+        raise ContractError("workflow.loop.instance_key", "must be a non-empty string")
+    retain_cycles = _bounded_integer(
+        value.get("retain_cycles", 20),
+        "workflow.loop.retain_cycles",
+        1,
+        MAX_LOOP_RETENTION_CYCLES,
+    )
+    raw_permissions = value.get("permissions", {})
+    if not isinstance(raw_permissions, dict):
+        raise ContractError("workflow.loop.permissions", "must be an object")
+    _require_keys(raw_permissions, "workflow.loop.permissions", set(), LOOP_PERMISSION_NAMES)
+    permissions: dict[str, bool] = {}
+    for name in sorted(LOOP_PERMISSION_NAMES):
+        permission = raw_permissions.get(name, False)
+        if not isinstance(permission, bool):
+            raise ContractError(f"workflow.loop.permissions.{name}", "must be a boolean")
+        permissions[name] = permission
+    return {
+        "mode": "until-cancelled",
+        "interval_seconds": interval,
+        "jitter_seconds": jitter,
+        "backoff": backoff,
+        "max_backoff_seconds": max_backoff,
+        "max_calls_per_cycle": max_calls,
+        "max_cycle_seconds": max_cycle,
+        "max_consecutive_failures": max_failures,
+        "cursor": cursor,
+        "cursor_input": cursor_input,
+        "instance_key": instance_key,
+        "retain_cycles": retain_cycles,
+        "permissions": permissions,
+    }
 
 
 def _strict_schema(schema: Any, path: str, *, root: bool = False) -> None:
@@ -590,11 +720,7 @@ def load_workflow(
     required = {"schema_version", "workflow_id", "description", "max_parallel", "inputs", "tasks"}
     if schema_version == EXEC_WORKFLOW_SCHEMA_V2:
         required.add("agents")
-    _require_keys(
-        raw,
-        "workflow",
-        required,
-    )
+    _require_keys(raw, "workflow", required, {"loop"})
     agents = (
         _load_workflow_agents(raw, path, project, validate_project_agents=validate_project_agents)
         if schema_version == EXEC_WORKFLOW_SCHEMA_V2
@@ -615,6 +741,7 @@ def load_workflow(
         if not isinstance(name, str) or not IDENTIFIER.fullmatch(name) or input_type not in VALUE_TYPES:
             raise ContractError("workflow.inputs", f"invalid input {name!r}")
         inputs[name] = input_type
+    loop = _validate_loop_value(raw.get("loop"), inputs)
     if not isinstance(raw["tasks"], list) or not raw["tasks"]:
         raise ContractError("workflow.tasks", "must be a non-empty array")
     if len(raw["tasks"]) > MAX_TASKS:
@@ -622,7 +749,8 @@ def load_workflow(
     tasks: dict[str, dict[str, Any]] = {}
     allowed_optional = {
         "foreach", "item_name", "model", "reasoning_effort", "sandbox", "cwd",
-        "timeout_seconds", "retries", "max_items", "agent",
+        "timeout_seconds", "retries", "max_items", "agent", "idempotency_key",
+        "write_isolation",
     }
     root = path.parent.resolve()
     for index, item in enumerate(raw["tasks"]):
@@ -678,6 +806,14 @@ def load_workflow(
             sandbox = item.get("sandbox", "read-only")
         if sandbox not in SANDBOXES:
             raise ContractError(f"{task_path}.sandbox", f"must be one of {sorted(SANDBOXES)}")
+        write_isolation = item.get("write_isolation")
+        if write_isolation is not None and write_isolation != "git-worktree":
+            raise ContractError(f"{task_path}.write_isolation", "must be 'git-worktree'")
+        if loop and sandbox != "read-only" and write_isolation != "git-worktree":
+            raise ContractError(
+                f"{task_path}.write_isolation",
+                "persistent loop write tasks require 'git-worktree' isolation",
+            )
         timeout = item.get("timeout_seconds", 1800)
         retries = item.get("retries", 0)
         max_items = item.get("max_items", 1000)
@@ -694,6 +830,17 @@ def load_workflow(
         cwd_path = Path(cwd) if isinstance(cwd, str) else Path("..")
         if not isinstance(cwd, str) or cwd_path.is_absolute() or ".." in cwd_path.parts:
             raise ContractError(f"{task_path}.cwd", "must be project-relative without parent traversal")
+        idempotency_key = item.get("idempotency_key")
+        if idempotency_key is not None:
+            if foreach is None:
+                raise ContractError(f"{task_path}.idempotency_key", "requires foreach")
+            if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+                raise ContractError(f"{task_path}.idempotency_key", "must be a non-empty template")
+        elif loop and foreach is not None:
+            raise ContractError(
+                f"{task_path}.idempotency_key",
+                "persistent loop fan-out tasks require an idempotency key",
+            )
         tasks[task_id] = {
             **item,
             "depends_on": dependencies,
@@ -759,12 +906,62 @@ def load_workflow(
             )
             if value_type not in {None, "array"}:
                 raise ContractError(f"workflow.tasks.{task_id}.foreach", "must resolve to an array")
+            idempotency_key = task.get("idempotency_key")
+            if idempotency_key:
+                expressions = PLACEHOLDER.findall(idempotency_key)
+                remainder = PLACEHOLDER.sub("", idempotency_key)
+                if not expressions or "{{" in remainder or "}}" in remainder:
+                    raise ContractError(
+                        f"workflow.tasks.{task_id}.idempotency_key",
+                        "must contain valid local template expressions",
+                    )
+                for expression in expressions:
+                    _validate_expression(
+                        expression.strip(),
+                        task_id=task_id,
+                        task=task,
+                        tasks=tasks,
+                        inputs=inputs,
+                        local_allowed=True,
+                    )
+    if loop:
+        cursor_parts = loop["cursor"].split(".")
+        if len(cursor_parts) < 4 or cursor_parts[0] != "tasks" or cursor_parts[2] != "output":
+            raise ContractError("workflow.loop.cursor", "must have the form tasks.TASK.output[.FIELD]")
+        producer = cursor_parts[1]
+        if producer not in tasks:
+            raise ContractError("workflow.loop.cursor", f"unknown task {producer!r}")
+        if tasks[producer].get("foreach"):
+            raise ContractError("workflow.loop.cursor", "must not select a fan-out task output")
+        cursor_type = _schema_type_at(tasks[producer]["_schema"], cursor_parts[3:], loop["cursor"])
+        cursor_input = loop.get("cursor_input")
+        if cursor_input and cursor_type != inputs[cursor_input]:
+            raise ContractError(
+                "workflow.loop.cursor_input",
+                f"type {inputs[cursor_input]!r} does not match cursor type {cursor_type!r}",
+            )
+        instance_expressions = PLACEHOLDER.findall(loop["instance_key"])
+        instance_remainder = PLACEHOLDER.sub("", loop["instance_key"])
+        if "{{" in instance_remainder or "}}" in instance_remainder:
+            raise ContractError("workflow.loop.instance_key", "contains malformed template braces")
+        for expression in instance_expressions:
+            if not expression.strip().startswith("inputs."):
+                raise ContractError("workflow.loop.instance_key", "may reference only workflow inputs")
+            _validate_expression(
+                expression.strip(),
+                task_id=workflow_id,
+                task={"depends_on": [], "item_name": "item"},
+                tasks=tasks,
+                inputs=inputs,
+                local_allowed=False,
+            )
     return {
         "schema_version": schema_version,
         "workflow_id": workflow_id,
         "description": raw["description"],
         "max_parallel": max_parallel,
         "inputs": dict(sorted(inputs.items())),
+        "loop": loop,
         "agents": agents,
         "tasks": tasks,
         "order": visited,
@@ -858,6 +1055,13 @@ def _copy_workflow(
         destination = target / agent["snapshot_path"]
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(agent["_snapshot_path"], destination)
+    example_inputs = source.parent / "example-inputs.json"
+    if example_inputs.is_file():
+        value = _read_json(example_inputs)
+        if not isinstance(value, dict):
+            raise ContractError(str(example_inputs), "must contain an object")
+        validate_typed_values(value, workflow["inputs"], "example-inputs")
+        _atomic_json(target / "example-inputs.json", value)
     load_workflow(
         target / "workflow.json",
         project,
@@ -926,6 +1130,8 @@ def _execution_plan(workflow: Mapping[str, Any], inputs: Mapping[str, Any]) -> t
                 "reasoning_effort": task.get("reasoning_effort"),
                 "agent": task.get("agent"),
                 "agent_sha256": task.get("_agent", {}).get("sha256") if task.get("_agent") else None,
+                "idempotency_key": task.get("idempotency_key"),
+                "write_isolation": task.get("write_isolation"),
                 "resolved_agent": (
                     {
                         "name": task["agent"],
@@ -963,6 +1169,327 @@ class RunStore:
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps({"time": utc_now(), "type": event_type, "payload": payload}, ensure_ascii=False, sort_keys=True) + "\n")
             path.chmod(0o600)
+
+
+LOOP_LIFECYCLE_STATUSES = {
+    "queued",
+    "running",
+    "sleeping",
+    "pausing",
+    "paused",
+    "cancelling",
+    "cancelled",
+    "circuit-open",
+    "failed",
+}
+LOOP_CONTROL_STATUSES = {"running", "paused", "cancelled"}
+LOOP_TERMINAL_STATUSES = {"cancelled", "failed"}
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(token|password|secret|authorization|api[_-]?key)\s*[:=]\s*([^\s,;]+)"
+)
+_SECRET_TOKEN = re.compile(r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b")
+
+
+def _redact_text(value: str) -> str:
+    value = _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
+    return _SECRET_TOKEN.sub("[REDACTED]", value)
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _redact_value(item) for key, item in value.items()}
+    return value
+
+
+@contextlib.contextmanager
+def _exclusive_path_lock(path: Path):
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _read_loop_events(run_dir: Path) -> list[dict[str, Any]]:
+    path = run_dir / "state.jsonl"
+    if not path.exists():
+        return []
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ContractError(str(path), str(exc)) from exc
+    if payload and not payload.endswith(b"\n"):
+        raise ContractError(str(path), "truncated tail: final event is not newline-terminated")
+    events: list[dict[str, Any]] = []
+    previous_digest: str | None = None
+    for index, raw_line in enumerate(payload.splitlines(), 1):
+        try:
+            event = json.loads(raw_line, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ContractError(str(path), f"corrupt event at line {index}: {exc}") from exc
+        if not isinstance(event, dict):
+            raise ContractError(str(path), f"event at line {index} must be an object")
+        if event.get("sequence") != index:
+            raise ContractError(str(path), f"event at line {index} has non-monotonic sequence")
+        if event.get("previous_event_digest") != previous_digest:
+            raise ContractError(str(path), f"event at line {index} breaks the digest chain")
+        claimed = event.get("event_digest")
+        material = dict(event)
+        material.pop("event_digest", None)
+        actual = digest_json(material)
+        if claimed != actual:
+            raise ContractError(str(path), f"event at line {index} has an invalid digest")
+        events.append(event)
+        previous_digest = claimed
+    return events
+
+
+def _loop_task_counts(state: Mapping[str, Any]) -> dict[str, int]:
+    summary = state.get("last_task_summary", {})
+    counts = {name: 0 for name in ("processed", "pending", "blocked", "failed")}
+    if not isinstance(summary, dict):
+        return counts
+    for item in summary.values():
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        if status == "completed":
+            counts["processed"] += int(item.get("completed_items", 1))
+            counts["failed"] += int(item.get("failed_items", 0))
+        elif status in {"pending", "running"}:
+            counts["pending"] += 1
+        elif status == "blocked":
+            counts["blocked"] += 1
+        elif status in {"failed", "cancelled"}:
+            counts["failed"] += 1
+    return counts
+
+
+def _read_loop_checkpoint(
+    run_dir: Path, *, run_id: str, workflow_digest: str
+) -> dict[str, Any]:
+    path = run_dir / "checkpoint.json"
+    value = _read_json(path)
+    if not isinstance(value, dict):
+        raise ContractError(str(path), "must contain an object")
+    required = {
+        "schema_version",
+        "run_id",
+        "cycle_id",
+        "cursor",
+        "workflow_digest",
+        "input_digest",
+        "output_digest",
+        "committed_at",
+    }
+    _require_keys(value, str(path), required)
+    if value["schema_version"] != "codex-exec-loop-checkpoint.v1":
+        raise ContractError(str(path), "has an unsupported schema_version")
+    if value["run_id"] != run_id or value["workflow_digest"] != workflow_digest:
+        raise ContractError(str(path), "does not match the loop run authority")
+    if not isinstance(value["cycle_id"], int) or isinstance(value["cycle_id"], bool) or value["cycle_id"] < 0:
+        raise ContractError(str(path), "cycle_id must be a non-negative integer")
+    return value
+
+
+def _loop_event_record(
+    state: Mapping[str, Any],
+    event_type: str,
+    payload: Mapping[str, Any],
+    sequence: int,
+    previous_digest: str | None,
+) -> dict[str, Any]:
+    checkpoint = state.get("checkpoint", {})
+    record: dict[str, Any] = {
+        "run_id": state["run_id"],
+        "loop_id": state["loop_id"],
+        "cycle_id": state.get("current_cycle_id"),
+        "sequence": sequence,
+        "timestamp": _precise_utc_now(),
+        "event": event_type,
+        "status": state["status"],
+        "cursor": (
+            {"sha256": digest_json(checkpoint.get("cursor"))}
+            if checkpoint.get("cursor") is not None
+            else None
+        ),
+        "checkpoint": {
+            "cycle_id": checkpoint.get("cycle_id", 0),
+            "committed_at": checkpoint.get("committed_at"),
+        },
+        "workflow_digest": state["workflow_digest"],
+        "project_root": state["project_root"],
+        "input_digest": state.get("current_input_digest"),
+        "output_digest": state.get("last_output_digest"),
+        "task_summary": _redact_value(state.get("last_task_summary", {})),
+        "item_counts": _loop_task_counts(state),
+        "call_usage": _redact_value(state.get("call_usage", {})),
+        "next_wake_at": state.get("next_wake_at"),
+        "consecutive_failures": state.get("consecutive_failures", 0),
+        "circuit_breaker": state.get("circuit_breaker", "closed"),
+        "error": _redact_value(state.get("error")),
+        "metadata": _redact_value(dict(payload)),
+        "previous_event_digest": previous_digest,
+    }
+    record["event_digest"] = digest_json(record)
+    return record
+
+
+def _append_loop_event_locked(
+    run_dir: Path,
+    state: Mapping[str, Any],
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    events = _read_loop_events(run_dir)
+    previous_digest = events[-1]["event_digest"] if events else None
+    event = _loop_event_record(state, event_type, payload, len(events) + 1, previous_digest)
+    path = run_dir / "state.jsonl"
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8", closefd=False) as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
+    return event
+
+
+def _loop_state_markdown(run_dir: Path) -> str:
+    events = _read_loop_events(run_dir)
+    if not events:
+        raise ContractError(str(run_dir / "state.jsonl"), "contains no lifecycle events")
+    current = events[-1]
+    errors_reversed: list[dict[str, Any]] = []
+    seen_errors: set[tuple[Any, Any]] = set()
+    for event in reversed(events):
+        if not event.get("error"):
+            continue
+        identity = (event.get("cycle_id"), event.get("error"))
+        if identity in seen_errors:
+            continue
+        seen_errors.add(identity)
+        errors_reversed.append(event)
+        if len(errors_reversed) == 5:
+            break
+    errors = list(reversed(errors_reversed))
+    counts = current["item_counts"]
+    checkpoint = _read_loop_checkpoint(
+        run_dir,
+        run_id=current["run_id"],
+        workflow_digest=current["workflow_digest"],
+    )
+    project = current["project_root"]
+    run_id = current["run_id"]
+    command = f'python3 "{Path(__file__).resolve()}" --project-root "{project}"'
+    error_lines = [f"- {item['timestamp']}: {item['error']}" for item in errors] or ["- None"]
+    lines = [
+        "<!-- Generated from state.jsonl and checkpoint.json. Do not edit. -->",
+        f"# Loop run {run_id}",
+        "",
+        f"- Status: `{current['status']}`",
+        f"- Workflow digest: `{current['workflow_digest']}`",
+        f"- Project root: `{project}`",
+        f"- Current cycle: `{current.get('cycle_id')}`",
+        f"- Last completed cycle: `{checkpoint.get('cycle_id', 0)}`",
+        f"- Last successful checkpoint: `{checkpoint.get('committed_at') or 'none'}`",
+        f"- Next wake: `{current.get('next_wake_at') or 'none'}`",
+        f"- Processed / pending / blocked / failed: `{counts['processed']} / {counts['pending']} / {counts['blocked']} / {counts['failed']}`",
+        f"- Consecutive failures: `{current.get('consecutive_failures', 0)}`",
+        f"- Circuit breaker: `{current.get('circuit_breaker', 'closed')}`",
+        "",
+        "## Recent errors",
+        "",
+        *error_lines,
+        "",
+        "## Commands",
+        "",
+        f"- Status: `{command} status {run_id}`",
+        f"- Resume: `{command} resume {run_id}`",
+        f"- Cancel: `{command} cancel {run_id}`",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _rebuild_loop_projection(run_dir: Path) -> None:
+    _atomic_text(run_dir / "STATE.md", _loop_state_markdown(run_dir))
+
+
+def _loop_transition(
+    run_dir: Path,
+    event_type: str,
+    payload: Mapping[str, Any] | None = None,
+    mutate: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    with _exclusive_path_lock(run_dir / "loop-state.lock"):
+        state = _read_json(run_dir / "run.json")
+        if mutate is not None:
+            mutate(state)
+        state["updated_at"] = utc_now()
+        _atomic_json(run_dir / "run.json", state)
+        _append_loop_event_locked(run_dir, state, event_type, payload or {})
+        _rebuild_loop_projection(run_dir)
+        return state
+
+
+def _idempotency_lookup(
+    loop_run_dir: Path,
+    task_id: str,
+    key: str,
+    input_digest: str,
+) -> Any | None:
+    with _exclusive_path_lock(loop_run_dir / "idempotency.lock"):
+        state = _read_json(loop_run_dir / "idempotency.json")
+        entry = state.get("entries", {}).get(task_id, {}).get(digest_json({"key": key}))
+        if entry is None:
+            return None
+        if entry.get("input_digest") != input_digest:
+            raise ContractError(
+                f"loop.idempotency.{task_id}",
+                f"key {key!r} was reused for different input data",
+            )
+        return entry.get("output")
+
+
+def _idempotency_commit(
+    loop_run_dir: Path,
+    task_id: str,
+    key: str,
+    input_digest: str,
+    output: Any,
+) -> None:
+    with _exclusive_path_lock(loop_run_dir / "idempotency.lock"):
+        state = _read_json(loop_run_dir / "idempotency.json")
+        entries = state.setdefault("entries", {}).setdefault(task_id, {})
+        key_digest = digest_json({"key": key})
+        existing = entries.get(key_digest)
+        if existing is not None and existing.get("input_digest") != input_digest:
+            raise ContractError(
+                f"loop.idempotency.{task_id}",
+                f"key {key!r} was reused for different input data",
+            )
+        if existing is None:
+            entries[key_digest] = {
+                "key": _redact_text(key),
+                "input_digest": input_digest,
+                "output_digest": digest_json(output),
+                "output": output,
+                "committed_at": _precise_utc_now(),
+            }
+            _atomic_json(loop_run_dir / "idempotency.json", state)
 
 
 async def _terminate(process: asyncio.subprocess.Process) -> None:
@@ -1598,10 +2125,25 @@ async def _execute_run(run_dir: Path) -> int:
     state = _read_json(run_dir / "run.json")
     store = RunStore(run_dir, state)
     project = Path(state["project_root"])
+    execution_project = Path(state.get("execution_root", state["project_root"]))
+    loop_run_dir = Path(state["loop_run_dir"]) if state.get("loop_run_dir") else None
     workflow = load_workflow(run_dir / "workflow" / "workflow.json", project)
     if _workflow_digest(workflow) != state.get("workflow_digest"):
         raise ContractError("run.workflow_digest", "snapshot no longer matches queued run authority")
     inputs = state["inputs"]
+    if loop_run_dir is not None:
+        permissions = state.get("loop_permissions", {})
+        allowed = sorted(name for name, enabled in permissions.items() if enabled)
+        denied = sorted(name for name in LOOP_PERMISSION_NAMES if not permissions.get(name, False))
+        guard = (
+            "Persistent-loop authority is fixed by workflow configuration. "
+            f"Allowed external mutations: {', '.join(allowed) if allowed else 'none'}. "
+            f"Forbidden external mutations: {', '.join(denied) if denied else 'none'}. "
+            "Do not infer authorization from the prompt, repository access, or prior cycles."
+        )
+        for task in workflow["tasks"].values():
+            existing = task.get("developer_instructions")
+            task["developer_instructions"] = f"{existing}\n\n{guard}" if existing else guard
     codex_bin = state["codex_bin"]
     terminal_grace_seconds = float(
         state.get("terminal_grace_seconds", DEFAULT_TERMINAL_GRACE_SECONDS)
@@ -1715,11 +2257,36 @@ async def _execute_run(run_dir: Path) -> int:
                         {"task_id": task_id, "item_index": index, **payload},
                     )
 
+                output_state, saved_result, _ = _output_state(
+                    item_dir / "final.json", task["_schema"]
+                )
+                if output_state == "valid":
+                    await item_event("item.reused", {"reason": "completed_item_artifact"})
+                    return True, saved_result, None
+
+                idempotency_key: str | None = None
+                input_digest = digest_json(item)
+                if loop_run_dir is not None and task.get("idempotency_key"):
+                    idempotency_key = _render_prompt(
+                        task["idempotency_key"], inputs, outputs, local
+                    )
+                    cached = _idempotency_lookup(
+                        loop_run_dir, task_id, idempotency_key, input_digest
+                    )
+                    if cached is not None:
+                        _validate_instance(cached, task["_schema"])
+                        _atomic_json(item_dir / "final.json", cached)
+                        await item_event(
+                            "item.deduplicated",
+                            {"idempotency_key_digest": digest_json({"key": idempotency_key})},
+                        )
+                        return True, cached, None
+
                 result = await _run_one(
                     task,
                     item_dir,
                     prompt,
-                    project,
+                    execution_project,
                     codex_bin,
                     semaphore,
                     write_lock,
@@ -1729,6 +2296,14 @@ async def _execute_run(run_dir: Path) -> int:
                     item_progress,
                     item_event,
                 )
+                if result[0] and idempotency_key is not None:
+                    _idempotency_commit(
+                        loop_run_dir, task_id, idempotency_key, input_digest, result[1]
+                    )
+                    await item_event(
+                        "item.checkpointed",
+                        {"idempotency_key_digest": digest_json({"key": idempotency_key})},
+                    )
                 def count(current: dict[str, Any]) -> None:
                     current_task = current["tasks"][task_id]
                     current_task["completed_items"] += 1
@@ -1775,7 +2350,7 @@ async def _execute_run(run_dir: Path) -> int:
                 task,
                 task_root,
                 prompt,
-                project,
+                execution_project,
                 codex_bin,
                 semaphore,
                 write_lock,
@@ -1847,6 +2422,458 @@ async def _execute_run(run_dir: Path) -> int:
     return 0 if final_status == "completed" else 1
 
 
+def _loop_instance_key(workflow: Mapping[str, Any], inputs: Mapping[str, Any]) -> str:
+    template = workflow["loop"]["instance_key"]
+    return _render_prompt(template, inputs, {}, {})
+
+
+def _loop_instance_registry_path(
+    project: Path, workflow_id: str, instance_key: str
+) -> Path:
+    identity = digest_json(
+        {
+            "project_root": str(project),
+            "workflow_id": workflow_id,
+            "instance_key": instance_key,
+        }
+    )
+    return _runs_root(project) / ".loop-instances" / f"{identity}.json"
+
+
+def _claim_loop_instance(
+    project: Path,
+    workflow_id: str,
+    workflow_digest: str,
+    instance_key: str,
+    run_id: str,
+) -> Path:
+    path = _loop_instance_registry_path(project, workflow_id, instance_key)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _exclusive_path_lock(path.parent / ".registry.lock"):
+        if path.is_file():
+            existing = _read_json(path)
+            existing_run = existing.get("run_id") if isinstance(existing, dict) else None
+            if isinstance(existing_run, str) and RUN_IDENTIFIER.fullmatch(existing_run):
+                existing_path = _runs_root(project) / existing_run
+                if (existing_path / "run.json").is_file():
+                    existing_state = _read_json(existing_path / "run.json")
+                    if existing_state.get("status") not in LOOP_TERMINAL_STATUSES:
+                        raise ContractError(
+                            "workflow.loop.instance_key",
+                            f"active loop {existing_run} already owns instance {instance_key!r}",
+                        )
+        _atomic_json(
+            path,
+            {
+                "run_id": run_id,
+                "workflow_id": workflow_id,
+                "workflow_digest": workflow_digest,
+                "instance_key": instance_key,
+                "claimed_at": utc_now(),
+            },
+        )
+    return path
+
+
+def _loop_worker_is_live(state: Mapping[str, Any]) -> bool:
+    pid = state.get("worker_pid")
+    identity = state.get("worker_start_identity")
+    if not isinstance(pid, int) or not isinstance(identity, str):
+        return False
+    return _process_start_identity(pid) == identity
+
+
+def _cycle_call_usage(cycle_dir: Path, planned: int) -> dict[str, int]:
+    return {
+        "planned": planned,
+        "attempted": sum(1 for _ in (cycle_dir / "tasks").glob("**/attempt.json")),
+    }
+
+
+def _cycle_worktree(project: Path, cycle_dir: Path) -> Path:
+    worktree = cycle_dir / "worktree"
+    if worktree.is_dir():
+        return worktree
+    result = subprocess.run(
+        ["git", "-C", str(project), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ContractError(
+            "workflow.loop.write_isolation",
+            f"could not create isolated git worktree: {_redact_text(result.stderr.strip())}",
+        )
+    return worktree
+
+
+def _prepare_loop_cycle(
+    loop_run_dir: Path,
+    outer_state: Mapping[str, Any],
+    workflow: Mapping[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    cycle_id = int(outer_state.get("current_cycle_id") or (outer_state.get("last_cycle_id", 0) + 1))
+    cycle_dir = loop_run_dir / "cycles" / f"{cycle_id:06d}"
+    state_path = cycle_dir / "run.json"
+    if state_path.is_file():
+        return cycle_dir, _read_json(state_path)
+    cycle_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+    _copy_workflow(
+        loop_run_dir / "workflow" / "workflow.json",
+        cycle_dir / "workflow",
+        project=Path(outer_state["project_root"]),
+    )
+    cycle_inputs = dict(outer_state["base_inputs"])
+    cursor_input = workflow["loop"].get("cursor_input")
+    if cursor_input:
+        cycle_inputs[cursor_input] = outer_state["checkpoint"].get("cursor")
+    validate_typed_values(cycle_inputs, workflow["inputs"], "inputs")
+    planned_tasks, planned_calls = _execution_plan(workflow, cycle_inputs)
+    budget = int(outer_state["cycle_call_budget"])
+    if planned_calls > budget:
+        raise ContractError(
+            "workflow.loop.max_calls_per_cycle",
+            f"cycle allows up to {planned_calls} calls but the effective budget is {budget}",
+        )
+    execution_root = Path(outer_state["project_root"])
+    if any(task["sandbox"] != "read-only" for task in workflow["tasks"].values()):
+        execution_root = _cycle_worktree(execution_root, cycle_dir)
+    dependency_targets = {
+        dependency
+        for task in workflow["tasks"].values()
+        for dependency in task["depends_on"]
+    }
+    leaves = sorted(set(workflow["tasks"]) - dependency_targets)
+    cycle_state = {
+        "schema_version": "codex-exec-cycle-run.v1",
+        "run_id": f"{outer_state['run_id']}_cycle_{cycle_id:06d}",
+        "loop_run_dir": str(loop_run_dir),
+        "cycle_id": cycle_id,
+        "workflow_id": workflow["workflow_id"],
+        "workflow_scope": outer_state["workflow_scope"],
+        "workflow_digest": outer_state["workflow_digest"],
+        "project_root": outer_state["project_root"],
+        "execution_root": str(execution_root),
+        "inputs": cycle_inputs,
+        "codex_bin": outer_state["codex_bin"],
+        "max_parallel": outer_state["max_parallel"],
+        "max_calls": budget,
+        "planned_calls": planned_calls,
+        "terminal_grace_seconds": outer_state["terminal_grace_seconds"],
+        "loop_permissions": outer_state["loop"]["permissions"],
+        "plan": planned_tasks,
+        "status": "queued",
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
+        "leaf_tasks": leaves,
+        "tasks": {task_id: {"status": "pending"} for task_id in workflow["order"]},
+    }
+    _atomic_json(state_path, cycle_state)
+    return cycle_dir, cycle_state
+
+
+def _cycle_outputs(
+    cycle_dir: Path, workflow: Mapping[str, Any]
+) -> dict[str, Any]:
+    outputs: dict[str, Any] = {}
+    for task_id, task in workflow["tasks"].items():
+        path = cycle_dir / "tasks" / task_id / "final.json"
+        if path.is_file():
+            value = _read_json(path)
+            if task.get("foreach"):
+                if not isinstance(value, list):
+                    raise ContractError(str(path), "fan-out output must be an array")
+                for index, item in enumerate(value):
+                    _validate_instance(item, task["_schema"], f"output[{index}]")
+            else:
+                _validate_instance(value, task["_schema"])
+            outputs[task_id] = value
+    return outputs
+
+
+def _loop_delay(loop: Mapping[str, Any], run_id: str, cycle_id: int, failures: int) -> int:
+    interval = int(loop["interval_seconds"])
+    if failures and loop["backoff"] == "exponential":
+        interval = min(int(loop["max_backoff_seconds"]), interval * (2 ** (failures - 1)))
+    jitter = int(loop["jitter_seconds"])
+    if jitter:
+        material = hashlib.sha256(f"{run_id}:{cycle_id}".encode("utf-8")).digest()
+        interval += int.from_bytes(material[:4], "big") % (jitter + 1)
+    return interval
+
+
+def _prune_cycle_artifacts(loop_run_dir: Path, retain_cycles: int) -> None:
+    cycles = sorted((loop_run_dir / "cycles").glob("[0-9][0-9][0-9][0-9][0-9][0-9]"))
+    for path in cycles[:-retain_cycles]:
+        worktree = path / "worktree"
+        if worktree.is_dir():
+            project = Path(_read_json(loop_run_dir / "run.json")["project_root"])
+            subprocess.run(
+                ["git", "-C", str(project), "worktree", "remove", "--force", str(worktree)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        shutil.rmtree(path)
+
+
+def _loop_control(run_dir: Path) -> str:
+    value = _read_json(run_dir / "control.json")
+    desired = value.get("desired_status") if isinstance(value, dict) else None
+    if desired not in LOOP_CONTROL_STATUSES:
+        raise ContractError(str(run_dir / "control.json"), "has an invalid desired_status")
+    return desired
+
+
+async def _wait_for_loop_wake(run_dir: Path, wake_at: datetime) -> str:
+    while True:
+        desired = _loop_control(run_dir)
+        if desired != "running":
+            return desired
+        remaining = (wake_at - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            return "running"
+        await asyncio.sleep(min(0.25, remaining))
+
+
+async def _execute_loop_run(run_dir: Path) -> int:
+    state = _read_json(run_dir / "run.json")
+    project = Path(state["project_root"])
+    workflow = load_workflow(run_dir / "workflow" / "workflow.json", project)
+    if not workflow.get("loop"):
+        raise ContractError("run", "loop run snapshot has no loop contract")
+    if _workflow_digest(workflow) != state.get("workflow_digest"):
+        raise ContractError("run.workflow_digest", "snapshot no longer matches queued loop authority")
+    _read_loop_events(run_dir)
+    _rebuild_loop_projection(run_dir)
+
+    def mark_worker(current: dict[str, Any]) -> None:
+        current["status"] = "running"
+        current["worker_pid"] = os.getpid()
+        current["worker_start_identity"] = _process_start_identity(os.getpid())
+        current["worker_spawn_requested_at"] = None
+        current["last_worker_heartbeat"] = _precise_utc_now()
+        current["next_wake_at"] = None
+        current["error"] = None
+
+    _loop_transition(run_dir, "loop.started", {}, mark_worker)
+    while True:
+        desired = _loop_control(run_dir)
+        if desired == "cancelled":
+            _loop_transition(
+                run_dir,
+                "loop.cancelled",
+                {},
+                lambda current: current.update(
+                    {
+                        "status": "cancelled",
+                        "finished_at": utc_now(),
+                        "next_wake_at": None,
+                        "worker_pid": None,
+                        "worker_start_identity": None,
+                    }
+                ),
+            )
+            return 1
+        if desired == "paused":
+            _loop_transition(
+                run_dir,
+                "loop.paused",
+                {},
+                lambda current: current.update(
+                    {
+                        "status": "paused",
+                        "next_wake_at": None,
+                        "worker_pid": None,
+                        "worker_start_identity": None,
+                    }
+                ),
+            )
+            return 0
+
+        state = _read_json(run_dir / "run.json")
+        cycle_id = int(state.get("current_cycle_id") or (state.get("last_cycle_id", 0) + 1))
+
+        def mark_cycle(current: dict[str, Any]) -> None:
+            current["status"] = "running"
+            current["current_cycle_id"] = cycle_id
+            current["current_input_digest"] = digest_json(
+                {
+                    "base_inputs": current["base_inputs"],
+                    "cursor": current["checkpoint"].get("cursor"),
+                }
+            )
+            current["next_wake_at"] = None
+            current["last_worker_heartbeat"] = _precise_utc_now()
+
+        state = _loop_transition(run_dir, "cycle.started", {"cycle_id": cycle_id}, mark_cycle)
+        cycle_dir, cycle_state = _prepare_loop_cycle(run_dir, state, workflow)
+        cycle_status = cycle_state.get("status")
+        timed_out = False
+        if cycle_status in {"queued", "running"}:
+            try:
+                await asyncio.wait_for(
+                    _execute_run(cycle_dir),
+                    timeout=float(workflow["loop"]["max_cycle_seconds"]),
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                cycle_state = _read_json(cycle_dir / "run.json")
+                finished_at = utc_now()
+                for task_state in cycle_state["tasks"].values():
+                    if task_state.get("status") not in TERMINAL_TASK_STATUSES:
+                        task_state.update(
+                            {"status": "failed", "error": "cycle timeout", "finished_at": finished_at}
+                        )
+                cycle_state.update(
+                    {"status": "failed", "error": "cycle timeout", "finished_at": finished_at}
+                )
+                _atomic_json(cycle_dir / "run.json", cycle_state)
+        cycle_state = _read_json(cycle_dir / "run.json")
+        outputs = _cycle_outputs(cycle_dir, workflow)
+        planned_calls = int(cycle_state.get("planned_calls", 0))
+        call_usage = _cycle_call_usage(cycle_dir, planned_calls)
+        task_summary = cycle_state.get("tasks", {})
+        output_digest = digest_json(outputs)
+        success = cycle_state.get("status") == "completed"
+        if success:
+            cursor = _resolve_path(workflow["loop"]["cursor"], cycle_state["inputs"], outputs, {})
+            checkpoint = {
+                "schema_version": "codex-exec-loop-checkpoint.v1",
+                "run_id": state["run_id"],
+                "cycle_id": cycle_id,
+                "cursor": cursor,
+                "workflow_digest": state["workflow_digest"],
+                "input_digest": state["current_input_digest"],
+                "output_digest": output_digest,
+                "committed_at": _precise_utc_now(),
+            }
+            _atomic_json(run_dir / "checkpoint.json", checkpoint)
+
+            def complete_cycle(current: dict[str, Any]) -> None:
+                current.update(
+                    {
+                        "checkpoint": checkpoint,
+                        "last_cycle_id": cycle_id,
+                        "last_completed_cycle_id": cycle_id,
+                        "current_cycle_id": None,
+                        "last_output_digest": output_digest,
+                        "last_task_summary": task_summary,
+                        "call_usage": call_usage,
+                        "consecutive_failures": 0,
+                        "circuit_breaker": "closed",
+                        "error": None,
+                    }
+                )
+
+            state = _loop_transition(
+                run_dir,
+                "cycle.checkpointed",
+                {"cycle_id": cycle_id, "output_digest": output_digest},
+                complete_cycle,
+            )
+        else:
+            error = "cycle timeout" if timed_out else str(cycle_state.get("error") or "cycle failed")
+
+            def fail_cycle(current: dict[str, Any]) -> None:
+                failures = int(current.get("consecutive_failures", 0)) + 1
+                current.update(
+                    {
+                        "current_cycle_id": None,
+                        "last_cycle_id": cycle_id,
+                        "last_output_digest": output_digest,
+                        "last_task_summary": task_summary,
+                        "call_usage": call_usage,
+                        "consecutive_failures": failures,
+                        "error": _redact_text(error),
+                    }
+                )
+
+            state = _loop_transition(
+                run_dir,
+                "cycle.failed",
+                {"cycle_id": cycle_id, "timed_out": timed_out},
+                fail_cycle,
+            )
+
+        desired = _loop_control(run_dir)
+        if desired == "cancelled":
+            _loop_transition(
+                run_dir,
+                "loop.cancelled",
+                {"after_cycle": cycle_id},
+                lambda current: current.update(
+                    {
+                        "status": "cancelled",
+                        "finished_at": utc_now(),
+                        "next_wake_at": None,
+                        "worker_pid": None,
+                        "worker_start_identity": None,
+                    }
+                ),
+            )
+            return 1
+        if desired == "paused":
+            _loop_transition(
+                run_dir,
+                "loop.paused",
+                {"after_cycle": cycle_id},
+                lambda current: current.update(
+                    {
+                        "status": "paused",
+                        "next_wake_at": None,
+                        "worker_pid": None,
+                        "worker_start_identity": None,
+                    }
+                ),
+            )
+            return 0
+        failures = int(state.get("consecutive_failures", 0))
+        if failures >= int(workflow["loop"]["max_consecutive_failures"]):
+            _atomic_json(
+                run_dir / "control.json",
+                {"desired_status": "paused", "updated_at": utc_now(), "reason": "circuit-breaker"},
+            )
+            _loop_transition(
+                run_dir,
+                "loop.circuit-opened",
+                {"after_cycle": cycle_id},
+                lambda current: current.update(
+                    {
+                        "status": "circuit-open",
+                        "circuit_breaker": "open",
+                        "next_wake_at": None,
+                        "worker_pid": None,
+                        "worker_start_identity": None,
+                    }
+                ),
+            )
+            return 1
+
+        delay = _loop_delay(workflow["loop"], state["run_id"], cycle_id, failures)
+        wake_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        _loop_transition(
+            run_dir,
+            "loop.sleeping",
+            {"delay_seconds": delay},
+            lambda current: current.update(
+                {"status": "sleeping", "next_wake_at": wake_at.isoformat(timespec="seconds")}
+            ),
+        )
+        _prune_cycle_artifacts(run_dir, int(workflow["loop"]["retain_cycles"]))
+        desired = await _wait_for_loop_wake(run_dir, wake_at)
+        if desired != "running":
+            continue
+        _loop_transition(
+            run_dir,
+            "loop.woke",
+            {},
+            lambda current: current.update({"status": "running", "next_wake_at": None}),
+        )
+
+
 async def execute_run(run_dir: Path) -> int:
     """Execute one queued run under a nonblocking, process-wide run lock."""
 
@@ -1861,6 +2888,13 @@ async def execute_run(run_dir: Path) -> int:
             raise ContractError("run", "another worker already owns this run") from exc
         try:
             state = _read_json(run_dir / "run.json")
+            if state.get("schema_version") == "codex-exec-loop-run.v1":
+                if state.get("status") in LOOP_TERMINAL_STATUSES | {"paused"}:
+                    raise ContractError(
+                        "run.status",
+                        f"loop worker cannot start from {state.get('status')!r}; use resume when paused",
+                    )
+                return await _execute_loop_run(run_dir)
             if state.get("status") not in {"queued", "running"}:
                 raise ContractError(
                     "run.status",
@@ -1870,7 +2904,26 @@ async def execute_run(run_dir: Path) -> int:
         except BaseException as exc:
             with contextlib.suppress(Exception):
                 state = _read_json(run_dir / "run.json")
-                if state.get("status") not in TERMINAL_RUN_STATUSES:
+                if state.get("schema_version") == "codex-exec-loop-run.v1":
+                    if state.get("status") not in LOOP_TERMINAL_STATUSES | {"paused", "circuit-open"}:
+                        interrupted = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt))
+                        error = "loop worker interrupted" if interrupted else str(exc) or type(exc).__name__
+                        _loop_transition(
+                            run_dir,
+                            "loop.worker-failed",
+                            {"interrupted": interrupted},
+                            lambda current: current.update(
+                                {
+                                    "status": "failed",
+                                    "error": _redact_text(error),
+                                    "finished_at": utc_now(),
+                                    "next_wake_at": None,
+                                    "worker_pid": None,
+                                    "worker_start_identity": None,
+                                }
+                            ),
+                        )
+                elif state.get("status") not in TERMINAL_RUN_STATUSES:
                     interrupted = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt))
                     terminal_status = "cancelled" if interrupted else "failed"
                     error = "worker interrupted" if interrupted else str(exc) or type(exc).__name__
@@ -1918,10 +2971,15 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
         workflow = load_workflow(run_dir / "workflow" / "workflow.json", project)
         validate_typed_values(inputs, workflow["inputs"], "inputs")
         planned_tasks, planned_calls = _execution_plan(workflow, inputs)
-        if planned_calls > args.max_calls:
+        effective_call_budget = (
+            min(args.max_calls, workflow["loop"]["max_calls_per_cycle"])
+            if workflow.get("loop")
+            else args.max_calls
+        )
+        if planned_calls > effective_call_budget:
             raise ContractError(
                 "max_calls",
-                f"plan allows up to {planned_calls} calls; increase --max-calls explicitly (maximum {MAX_CALLS})",
+                f"plan allows up to {planned_calls} calls; effective per-run budget is {effective_call_budget}",
             )
         sandboxes = {task["sandbox"] for task in workflow["tasks"].values()}
         if "danger-full-access" in sandboxes and not args.allow_danger_full_access:
@@ -1931,6 +2989,74 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
     except Exception:
         shutil.rmtree(run_dir)
         raise
+    if workflow.get("loop"):
+        instance_key = _loop_instance_key(workflow, inputs)
+        workflow_digest = _workflow_digest(workflow)
+        registry_path = _claim_loop_instance(
+            project, workflow["workflow_id"], workflow_digest, instance_key, run_id
+        )
+        cursor_input = workflow["loop"].get("cursor_input")
+        initial_cursor = inputs.get(cursor_input) if cursor_input else None
+        checkpoint = {
+            "schema_version": "codex-exec-loop-checkpoint.v1",
+            "run_id": run_id,
+            "cycle_id": 0,
+            "cursor": initial_cursor,
+            "workflow_digest": workflow_digest,
+            "input_digest": digest_json(inputs),
+            "output_digest": None,
+            "committed_at": None,
+        }
+        state = {
+            "schema_version": "codex-exec-loop-run.v1",
+            "run_id": run_id,
+            "loop_id": digest_json({"run_id": run_id, "instance_key": instance_key})[:20],
+            "workflow_id": workflow["workflow_id"],
+            "workflow_scope": scope,
+            "workflow_digest": workflow_digest,
+            "project_root": str(project),
+            "base_inputs": inputs,
+            "codex_bin": args.codex_bin,
+            "max_parallel": args.max_parallel or workflow["max_parallel"],
+            "cycle_call_budget": effective_call_budget,
+            "planned_calls_per_cycle": planned_calls,
+            "terminal_grace_seconds": terminal_grace_seconds,
+            "loop": workflow["loop"],
+            "instance_key": instance_key,
+            "instance_registry": str(registry_path),
+            "plan": planned_tasks,
+            "status": "queued",
+            "worker_spawn_requested_at": _precise_utc_now(),
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "checkpoint": checkpoint,
+            "last_cycle_id": 0,
+            "last_completed_cycle_id": 0,
+            "current_cycle_id": None,
+            "last_task_summary": {},
+            "call_usage": {"planned": planned_calls, "attempted": 0},
+            "consecutive_failures": 0,
+            "circuit_breaker": "closed",
+            "next_wake_at": None,
+            "error": None,
+        }
+        _atomic_json(run_dir / "run.json", state)
+        _atomic_json(run_dir / "checkpoint.json", checkpoint)
+        _atomic_json(
+            run_dir / "control.json",
+            {"desired_status": "running", "updated_at": utc_now()},
+        )
+        _atomic_json(
+            run_dir / "idempotency.json",
+            {"schema_version": "codex-exec-loop-idempotency.v1", "entries": {}},
+        )
+        _loop_transition(
+            run_dir,
+            "loop.queued",
+            {"instance_key": instance_key, "planned_calls_per_cycle": planned_calls},
+        )
+        return run_dir
+
     dependency_targets = {dependency for task in workflow["tasks"].values() for dependency in task["depends_on"]}
     leaves = sorted(set(workflow["tasks"]) - dependency_targets)
     state = {
@@ -1978,11 +3104,118 @@ def _resolve_run(reference: str, project: Path) -> Path:
 
 def _print_status(state: Mapping[str, Any]) -> None:
     print(f"{state['run_id']}  {state['status']}  {state['workflow_id']}")
+    if state.get("schema_version") == "codex-exec-loop-run.v1":
+        checkpoint = state.get("checkpoint", {})
+        print(
+            f"  cycle: current={state.get('current_cycle_id')} "
+            f"last={state.get('last_cycle_id', 0)} checkpoint={checkpoint.get('cycle_id', 0)}"
+        )
+        print(
+            f"  failures: {state.get('consecutive_failures', 0)} "
+            f"circuit={state.get('circuit_breaker', 'closed')} "
+            f"next_wake={state.get('next_wake_at')}"
+        )
+        return
     for task_id, task in state["tasks"].items():
         details = ""
         if "total" in task:
             details = f" {task.get('completed_items', 0)}/{task['total']}"
         print(f"  {task_id}: {task['status']}{details}")
+
+
+def _spawn_worker(run_dir: Path, project: Path) -> None:
+    log = (run_dir / "worker.log").open("ab")
+    try:
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--project-root",
+                str(project),
+                "_worker",
+                str(run_dir),
+            ],
+            cwd=project,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log.close()
+
+
+def _request_loop_control(run_dir: Path, desired: str) -> dict[str, Any]:
+    if desired not in LOOP_CONTROL_STATUSES:
+        raise ContractError("loop control", f"invalid desired status {desired!r}")
+    with _exclusive_path_lock(run_dir / "loop-state.lock"):
+        events = _read_loop_events(run_dir)
+        if not events:
+            raise ContractError("loop state", "contains no lifecycle events")
+        state = _read_json(run_dir / "run.json")
+        if state.get("schema_version") != "codex-exec-loop-run.v1":
+            raise ContractError("run", "lifecycle command requires a persistent loop run")
+        current_status = state.get("status")
+        if desired == "running":
+            if current_status == "cancelled":
+                raise ContractError("run.status", "cancelled loops cannot be resumed")
+            if _loop_worker_is_live(state) and current_status not in {"paused", "circuit-open", "failed"}:
+                raise ContractError("run.status", "loop supervisor is already running")
+            if current_status == "queued" and state.get("worker_spawn_requested_at"):
+                raise ContractError("run.status", "loop supervisor resume is already queued")
+            status = "queued"
+            state.update(
+                {
+                    "status": status,
+                    "consecutive_failures": 0,
+                    "circuit_breaker": "closed",
+                    "error": None,
+                    "finished_at": None,
+                    "next_wake_at": None,
+                    "worker_spawn_requested_at": _precise_utc_now(),
+                }
+            )
+            event_type = "loop.resume-requested"
+        elif desired == "paused":
+            if current_status in LOOP_TERMINAL_STATUSES:
+                raise ContractError("run.status", f"cannot pause {current_status} loop")
+            status = "paused" if not _loop_worker_is_live(state) else "pausing"
+            state.update({"status": status, "next_wake_at": None})
+            event_type = "loop.pause-requested"
+        else:
+            if current_status == "cancelled":
+                return state
+            status = "cancelling" if _loop_worker_is_live(state) else "cancelled"
+            state.update({"status": status, "next_wake_at": None})
+            if status == "cancelled":
+                state["finished_at"] = utc_now()
+            event_type = "loop.cancel-requested"
+        state["updated_at"] = utc_now()
+        _atomic_json(
+            run_dir / "control.json",
+            {"desired_status": desired, "updated_at": utc_now()},
+        )
+        _atomic_json(run_dir / "run.json", state)
+        _append_loop_event_locked(run_dir, state, event_type, {"desired_status": desired})
+        _rebuild_loop_projection(run_dir)
+        return state
+
+
+def _tail_loop(run_dir: Path, lines: int, follow: bool) -> int:
+    emitted = 0
+    while True:
+        events = _read_loop_events(run_dir)
+        start = emitted if emitted else max(0, len(events) - lines)
+        for event in events[start:]:
+            print(json.dumps(event, ensure_ascii=False, sort_keys=True), flush=True)
+        emitted = len(events)
+        if not follow:
+            return 0
+        state = _read_json(run_dir / "run.json")
+        if state.get("status") in LOOP_TERMINAL_STATUSES | {"paused", "circuit-open"}:
+            return 0
+        time.sleep(0.25)
 
 
 def _template_workflow(name: str) -> dict[str, Any]:
@@ -2405,7 +3638,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-workspace-write", action="store_true")
     run.add_argument("--allow-danger-full-access", action="store_true")
 
-    for name in ("status", "wait", "result", "cancel"):
+    for name in ("status", "wait", "result", "cancel", "pause", "resume", "tail"):
         command = subparsers.add_parser(name)
         command.add_argument("run")
         if name == "status":
@@ -2414,6 +3647,9 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--timeout", type=int, default=0)
         if name == "result":
             command.add_argument("--task")
+        if name == "tail":
+            command.add_argument("--lines", type=int, default=20)
+            command.add_argument("--follow", action="store_true")
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("run_dir")
     return parser
@@ -2643,11 +3879,29 @@ def main(argv: list[str] | None = None) -> int:
             inputs = _parse_input_values(args.inputs, args.input)
             validate_typed_values(inputs, workflow["inputs"], "inputs")
             planned_tasks, planned_calls = _execution_plan(workflow, inputs)
-            if planned_calls > args.max_calls:
+            effective_call_budget = (
+                min(args.max_calls, workflow["loop"]["max_calls_per_cycle"])
+                if workflow.get("loop")
+                else args.max_calls
+            )
+            if planned_calls > effective_call_budget:
                 raise ContractError(
                     "max_calls",
-                    f"plan allows up to {planned_calls} calls; increase --max-calls explicitly (maximum {MAX_CALLS})",
+                    f"plan allows up to {planned_calls} calls; effective per-cycle budget is {effective_call_budget}",
                 )
+            loop_plan = None
+            if workflow.get("loop"):
+                loop_plan = {
+                    **workflow["loop"],
+                    "persistent": True,
+                    "effective_max_calls_per_cycle": effective_call_budget,
+                    "planned_calls_per_cycle": planned_calls,
+                    "cost_model": {
+                        "kind": "per-cycle",
+                        "total_calls": "unbounded-until-cancelled",
+                        "maximum_calls_per_cycle": effective_call_budget,
+                    },
+                }
             print(
                 json.dumps(
                     {
@@ -2655,8 +3909,9 @@ def main(argv: list[str] | None = None) -> int:
                         "scope": scope,
                         "workflow_digest": _workflow_digest(workflow),
                         "max_parallel": args.max_parallel or workflow["max_parallel"],
-                        "max_calls": args.max_calls,
-                        "planned_calls": planned_calls,
+                        "max_calls": effective_call_budget,
+                        "planned_calls": None if loop_plan else planned_calls,
+                        "loop": loop_plan,
                         "tasks": planned_tasks,
                     },
                     indent=2,
@@ -2668,26 +3923,34 @@ def main(argv: list[str] | None = None) -> int:
                 raise ContractError("max_parallel", "must be from 1 to 128")
             if not 1 <= args.max_calls <= MAX_CALLS:
                 raise ContractError("max_calls", f"must be from 1 to {MAX_CALLS}")
+            _, preview_path = resolve_workflow(args.workflow, project)
+            preview = load_workflow(preview_path, project)
+            if preview.get("loop") and not args.detach:
+                raise ContractError("run", "until-cancelled workflows require --detach")
             run_dir = _prepare_run(args, project)
             if args.detach:
-                log = (run_dir / "worker.log").open("ab")
                 try:
-                    subprocess.Popen(
-                        [sys.executable, str(Path(__file__).resolve()), "--project-root", str(project), "_worker", str(run_dir)],
-                        cwd=project,
-                        stdin=subprocess.DEVNULL,
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                        close_fds=True,
-                    )
+                    _spawn_worker(run_dir, project)
                 except OSError as exc:
                     state = _read_json(run_dir / "run.json")
-                    state.update({"status": "failed", "finished_at": utc_now(), "error": f"worker spawn failed: {exc}"})
-                    _atomic_json(run_dir / "run.json", state)
+                    spawn_error = _redact_text(f"worker spawn failed: {exc}")
+                    if state.get("schema_version") == "codex-exec-loop-run.v1":
+                        _loop_transition(
+                            run_dir,
+                            "loop.worker-spawn-failed",
+                            {},
+                            lambda current: current.update(
+                                {
+                                    "status": "failed",
+                                    "finished_at": utc_now(),
+                                    "error": spawn_error,
+                                }
+                            ),
+                        )
+                    else:
+                        state.update({"status": "failed", "finished_at": utc_now(), "error": f"worker spawn failed: {exc}"})
+                        _atomic_json(run_dir / "run.json", state)
                     raise
-                finally:
-                    log.close()
                 print(_read_json(run_dir / "run.json")["run_id"])
                 return 0
             code = asyncio.run(execute_run(run_dir))
@@ -2700,10 +3963,42 @@ def main(argv: list[str] | None = None) -> int:
                 raise ContractError("run", "worker path does not match this project's run storage")
             return asyncio.run(execute_run(run_dir))
         run_dir = _resolve_run(args.run, project)
+        state = _read_json(run_dir / "run.json")
         if args.command == "cancel":
+            if state.get("schema_version") == "codex-exec-loop-run.v1":
+                state = _request_loop_control(run_dir, "cancelled")
+                print(f"cancellation requested for {args.run}: {state['status']}")
+                return 0
             _atomic_text(run_dir / "cancel.requested", utc_now() + "\n")
             print(f"cancellation requested for {args.run}")
             return 0
+        if args.command == "pause":
+            state = _request_loop_control(run_dir, "paused")
+            print(f"pause requested for {args.run}: {state['status']}")
+            return 0
+        if args.command == "resume":
+            state = _request_loop_control(run_dir, "running")
+            try:
+                _spawn_worker(run_dir, project)
+            except OSError as exc:
+                spawn_error = _redact_text(str(exc))
+                _loop_transition(
+                    run_dir,
+                    "loop.worker-spawn-failed",
+                    {},
+                    lambda current: current.update(
+                        {"status": "failed", "error": spawn_error, "finished_at": utc_now()}
+                    ),
+                )
+                raise
+            print(f"resumed {args.run}")
+            return 0
+        if args.command == "tail":
+            if not 1 <= args.lines <= 10_000:
+                raise ContractError("tail.lines", "must be from 1 to 10000")
+            if state.get("schema_version") != "codex-exec-loop-run.v1":
+                raise ContractError("tail", "is available only for persistent loop runs")
+            return _tail_loop(run_dir, args.lines, args.follow)
         if args.command == "wait":
             started = datetime.now(timezone.utc).timestamp()
             while True:
@@ -2715,20 +4010,30 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"wait timed out for {args.run}", file=sys.stderr)
                     return 2
                 time.sleep(0.5)
-        state = _read_json(run_dir / "run.json")
         if args.command == "status":
+            if state.get("schema_version") == "codex-exec-loop-run.v1":
+                _read_loop_events(run_dir)
+                _rebuild_loop_projection(run_dir)
+                state = _read_json(run_dir / "run.json")
             if args.json:
                 print(json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2))
             else:
                 _print_status(state)
             return 0
         if args.command == "result":
+            result_root = run_dir
+            if state.get("schema_version") == "codex-exec-loop-run.v1":
+                cycle_id = int(state.get("last_completed_cycle_id", 0))
+                if cycle_id < 1:
+                    raise ContractError("result", "loop has no completed cycle")
+                result_root = run_dir / "cycles" / f"{cycle_id:06d}"
+                state = _read_json(result_root / "run.json")
             task_ids = [args.task] if args.task else state["leaf_tasks"]
             result: dict[str, Any] = {}
             for task_id in task_ids:
                 if task_id not in state["tasks"]:
                     raise ContractError("task", f"unknown task {task_id!r}")
-                path = run_dir / "tasks" / task_id / "final.json"
+                path = result_root / "tasks" / task_id / "final.json"
                 if not path.is_file():
                     raise ContractError("result", f"no final output for {task_id}")
                 result[task_id] = _read_json(path)
