@@ -1,0 +1,7 @@
+interface:
+  display_name: "Graph Completion"
+  short_description: "Fill high-impact graph gaps with evidence"
+  default_prompt: "Use $graph-completion to detect decision-relevant graph gaps, generate source-linked candidates, critique conflicts and identity, accept only validated facts, and stop when the target query is supported."
+
+policy:
+  allow_implicit_invocation: false

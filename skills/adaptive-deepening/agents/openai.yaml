@@ -1,0 +1,7 @@
+interface:
+  display_name: "Adaptive Deepening"
+  short_description: "Close high-impact gaps through evidence waves"
+  default_prompt: "Use $adaptive-deepening to draft early, identify decision-relevant gaps, run targeted evidence waves, critique discrepancies, and stop when further work is unlikely to change the result."
+
+policy:
+  allow_implicit_invocation: false

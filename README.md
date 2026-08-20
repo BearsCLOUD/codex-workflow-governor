@@ -9,7 +9,7 @@ Version 1 targets the current Linux Codex runtime and uses only the Python stand
 ## Repository Layout
 
 - `.codex-plugin/plugin.json` defines the plugin.
-- `skills/` contains workflow lifecycle skills and `score-documentation-quality`.
+- `skills/` contains workflow lifecycle, methodology, and documentation-governance skills.
 - `workflow_governor/` contains the compiler, contracts, ledger, MCP server, and hook implementation.
 - `scripts/` contains command-line entry points.
 - `hooks/hooks.json` registers bundled lifecycle hooks.
@@ -22,6 +22,12 @@ Guarded execution is available only when trusted hooks and native dispatch input
 
 ## Explicit Skills
 
-The plugin exposes `workflow-create`, `workflow-check`, `workflow-analyze`, `workflow-update`, `workflow-apply`, `workflow-visualize`, `workflow-run`, and `score-documentation-quality`. Workflow lifecycle skills disable implicit invocation. `score-documentation-quality` may trigger for relevant documentation work and selects the minimum sufficient mode: quick edit, formal scoring, or deep migration.
+The plugin exposes `workflow-create`, `workflow-check`, `workflow-analyze`, `workflow-update`, `workflow-apply`, `workflow-visualize`, and `workflow-run` for the workflow lifecycle.
+
+It also exposes `adaptive-deepening` and `graph-completion` as methodology skills for evidence-wave enrichment and knowledge-graph gap completion.
+
+`score-documentation-quality` handles documentation edits, evidence-backed 100-point scoring, and lossless instruction migration. It selects the minimum sufficient mode and may trigger implicitly for relevant documentation work.
+
+Workflow lifecycle and methodology skills disable implicit invocation. Drafting and updating never modify the target repository; only `workflow-apply` materializes a draft.
 
 The Workflow Governor runtime never runs Git commands and never creates Git policy. The documentation skill may publish only when the user authorizes it and the applicable repository instructions permit it.
