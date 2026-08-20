@@ -1,7 +1,7 @@
 {
   "name": "codex-workflow-governor",
-  "version": "0.1.0+codex.20260820184437",
-  "description": "Compile and govern explicit Codex workflow graphs with reusable evidence-enrichment methods",
+  "version": "0.2.0+codex.20260820184355",
+  "description": "Compile and govern Codex workflows, evidence enrichment, and documentation instructions",
   "author": {
     "name": "BearsCLOUD",
     "url": "https://github.com/BearsCLOUD"
@@ -13,13 +13,15 @@
     "codex",
     "workflow",
     "governance",
-    "mcp"
+    "mcp",
+    "documentation",
+    "instructions"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Workflow Governor",
-    "shortDescription": "Compile and govern explicit workflow graphs.",
-    "longDescription": "Create, validate, compile, visualize, and execute typed Codex workflows, with reusable adaptive-deepening and knowledge-graph-completion methodologies.",
+    "shortDescription": "Govern workflows, evidence methods, and documentation.",
+    "longDescription": "Create, validate, compile, visualize, and execute typed Codex workflows; deepen evidence and complete knowledge graphs; evaluate and improve documentation instructions with adaptive depth and lossless migration support.",
     "developerName": "BearsCLOUD",
     "category": "Development",
     "capabilities": [
@@ -31,7 +33,8 @@
       "Check the selected workflow and explain any drift.",
       "Run a guarded workflow by its workflow ID.",
       "Deepen an incomplete evidence synthesis through targeted waves.",
-      "Complete decision-relevant knowledge graph gaps with provenance."
+      "Complete decision-relevant knowledge graph gaps with provenance.",
+      "Review and improve this repository's documentation instructions."
     ]
   },
   "mcpServers": "./.mcp.json"

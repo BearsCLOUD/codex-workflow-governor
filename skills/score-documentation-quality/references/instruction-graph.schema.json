@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/score-documentation-quality/instruction-graph.schema.json",
+  "title": "Instruction relationship graph",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "mode", "producer", "scope", "nodes", "edges"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "mode": {"enum": ["explicit", "semantic"]},
+    "producer": {"enum": ["manual", "deterministic", "model_assisted"]},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "units"],
+      "properties": {
+        "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "units": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "content_sha256"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "label", "source"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$"},
+          "type": {"enum": ["artifact", "rule", "entity", "scope", "source"]},
+          "artifact_kind": {"enum": ["root_instruction", "contract", "archive", "supporting"]},
+          "label": {"type": "string", "minLength": 1},
+          "canonical_name": {"type": "string", "minLength": 1},
+          "aliases": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+          "authority": {"type": "boolean"},
+          "claim": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["subject", "modality", "polarity", "action", "object", "condition", "exception"],
+            "properties": {
+              "subject": {"type": "string", "minLength": 1},
+              "modality": {"enum": ["MUST", "SHOULD", "MAY", "FACT"]},
+              "polarity": {"enum": ["positive", "negative"]},
+              "action": {"type": "string", "minLength": 1},
+              "object": {"type": "string", "minLength": 1},
+              "condition": {"type": ["string", "null"]},
+              "exception": {"type": ["string", "null"]}
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["assertion", "status", "method", "adjudication", "adjudicator"],
+            "properties": {
+              "assertion": {"enum": ["explicit", "inferred"]},
+              "status": {"enum": ["candidate", "confirmed", "rejected", "unknown"]},
+              "method": {"enum": ["explicit_parse", "deterministic", "manual_analysis", "coreference", "entity_linking", "embedding", "nli", "llm"]},
+              "adjudication": {"enum": ["not_reviewed", "deterministic_confirmed", "manual_confirmed", "manual_rejected"]},
+              "adjudicator": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "id", "note"],
+                "properties": {
+                  "kind": {"enum": ["none", "human", "independent_agent", "deterministic_checker"]},
+                  "id": {"type": "string", "minLength": 1},
+                  "note": {"type": "string", "minLength": 1}
+                }
+              }
+            }
+          },
+          "source": {"$ref": "#/$defs/evidence"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"type": {"enum": ["artifact", "source"]}}, "required": ["type"]},
+            "then": {"required": ["authority"]}
+          },
+          {
+            "if": {"properties": {"type": {"const": "artifact"}}, "required": ["type"]},
+            "then": {"required": ["artifact_kind"]}
+          },
+          {
+            "if": {
+              "properties": {"type": {"enum": ["rule", "entity"]}},
+              "required": ["type"]
+            },
+            "then": {"required": ["provenance"]}
+          },
+          {
+            "if": {
+              "properties": {
+                "type": {"const": "artifact"},
+                "artifact_kind": {"enum": ["root_instruction", "contract"]}
+              },
+              "required": ["type", "artifact_kind"]
+            },
+            "then": {"properties": {"authority": {"const": true}}}
+          },
+          {
+            "if": {
+              "properties": {
+                "type": {"const": "artifact"},
+                "artifact_kind": {"const": "archive"}
+              },
+              "required": ["type", "artifact_kind"]
+            },
+            "then": {"properties": {"authority": {"const": false}}}
+          }
+        ]
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "from", "to", "assertion", "status", "method", "adjudication", "adjudicator", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$"},
+          "type": {"enum": ["owns", "precedes", "applies_to", "overrides", "derives_from", "aliases", "references", "routes_to"]},
+          "from": {"type": "string", "minLength": 1},
+          "to": {"type": "string", "minLength": 1},
+          "assertion": {"enum": ["explicit", "inferred"]},
+          "status": {"enum": ["candidate", "confirmed", "rejected", "unknown"]},
+          "method": {"enum": ["explicit_parse", "deterministic", "manual_analysis", "coreference", "entity_linking", "embedding", "nli", "llm"]},
+          "adjudication": {"enum": ["not_reviewed", "deterministic_confirmed", "manual_confirmed", "manual_rejected"]},
+          "adjudicator": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id", "note"],
+            "properties": {
+              "kind": {"enum": ["none", "human", "independent_agent", "deterministic_checker"]},
+              "id": {"type": "string", "minLength": 1},
+              "note": {"type": "string", "minLength": 1}
+            }
+          },
+          "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}}
+        }
+      }
+    },
+    "finding_resolutions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "finding_code", "nodes", "candidate_fingerprint", "decision", "method", "adjudicator", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$"},
+          "finding_code": {"enum": ["normalized-rule-conflict", "normalized-modality-drift"]},
+          "nodes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$"}
+          },
+          "candidate_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "decision": {"enum": ["rejected", "resolved"]},
+          "method": {"const": "manual_analysis"},
+          "adjudicator": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id", "note"],
+            "properties": {
+              "kind": {"enum": ["human", "independent_agent"]},
+              "id": {"type": "string", "minLength": 1},
+              "note": {"type": "string", "minLength": 1}
+            }
+          },
+          "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "locator", "note"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "locator": {"type": "string", "minLength": 1},
+        "note": {"type": "string", "minLength": 1},
+        "start_byte": {"type": "integer", "minimum": 0},
+        "end_byte": {"type": "integer", "minimum": 1},
+        "evidence_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "dependentRequired": {
+        "start_byte": ["end_byte", "evidence_sha256"],
+        "end_byte": ["start_byte", "evidence_sha256"],
+        "evidence_sha256": ["start_byte", "end_byte"]
+      }
+    }
+  }
+}

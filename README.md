@@ -1,6 +1,6 @@
 # Codex Workflow Governor
 
-Codex Workflow Governor compiles repository workflow sources into immutable runtime locks and generated views. It provides explicit skills, separate reader and maintainer MCP surfaces, and Codex hooks for permit-bound subagent dispatch.
+Codex Workflow Governor compiles repository workflow sources into immutable runtime locks and generated views. It provides explicit skills, separate reader and maintainer MCP surfaces, Codex hooks for permit-bound subagent dispatch, and an adaptive documentation-quality skill.
 
 ## Status
 
@@ -9,7 +9,7 @@ Version 1 targets the current Linux Codex runtime and uses only the Python stand
 ## Repository Layout
 
 - `.codex-plugin/plugin.json` defines the plugin.
-- `skills/` contains explicit workflow lifecycle and methodology skills.
+- `skills/` contains workflow lifecycle, methodology, and documentation-governance skills.
 - `workflow_governor/` contains the compiler, contracts, ledger, MCP server, and hook implementation.
 - `scripts/` contains command-line entry points.
 - `hooks/hooks.json` registers bundled lifecycle hooks.
@@ -28,6 +28,8 @@ It also exposes `adaptive-deepening` and `graph-completion` as methodology skill
 
 A Governor workflow graph coordinates execution. A task-owned knowledge graph stores domain entities and facts; `graph-completion` never treats those two graph types as the same state.
 
-Every skill disables implicit invocation. Drafting and updating never modify the target repository; only `workflow-apply` materializes a draft.
+`score-documentation-quality` handles documentation edits, evidence-backed 100-point scoring, and lossless instruction migration. It selects the minimum sufficient mode and may trigger implicitly for relevant documentation work.
 
-The plugin never runs Git commands and never creates Git policy. Agents continue to follow the applicable repository instructions.
+Workflow lifecycle and methodology skills disable implicit invocation. Drafting and updating never modify the target repository; only `workflow-apply` materializes a draft.
+
+The Workflow Governor runtime never runs Git commands and never creates Git policy. The documentation skill may publish only when the user authorizes it and the applicable repository instructions permit it.

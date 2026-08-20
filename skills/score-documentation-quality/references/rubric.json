@@ -1,0 +1,115 @@
+{
+  "schema_version": "2.0",
+  "calculation": {
+    "precision": 0.5,
+    "set_aggregation": "single_document_system_no_averaging",
+    "status_factors": {
+      "met": {"minimum": 1.0, "maximum": 1.0},
+      "partial": {"minimum": 0.5, "maximum": 0.5},
+      "unmet": {"minimum": 0.0, "maximum": 0.0},
+      "unknown": {"minimum": 0.0, "maximum": 1.0}
+    },
+    "confidence": {
+      "high_maximum_unknown_points": 0,
+      "medium_maximum_unknown_points": 10
+    }
+  },
+  "dimensions": [
+    {
+      "id": "authority_scope",
+      "name": "Полномочия и область действия",
+      "criteria": [
+        {"id": "purpose_scope", "name": "Назначение и границы", "points": 4},
+        {"id": "audience_applicability", "name": "Аудитория и применимость", "points": 3},
+        {"id": "owner_source", "name": "Владелец и источник истины", "points": 4},
+        {"id": "precedence_boundaries", "name": "Приоритет и внешние границы", "points": 4}
+      ]
+    },
+    {
+      "id": "correctness_verifiability",
+      "name": "Корректность и проверяемость",
+      "criteria": [
+        {"id": "primary_source_alignment", "name": "Соответствие первичным источникам", "points": 5},
+        {"id": "examples_commands_verified", "name": "Проверка примеров и команд", "points": 4},
+        {"id": "assumptions_uncertainty", "name": "Предположения и неизвестное", "points": 3},
+        {"id": "freshness_revision", "name": "Версия и актуальность", "points": 3}
+      ]
+    },
+    {
+      "id": "coverage",
+      "name": "Полнота сценариев",
+      "criteria": [
+        {"id": "main_path", "name": "Основной путь", "points": 4},
+        {"id": "preconditions_inputs", "name": "Предусловия и входы", "points": 3},
+        {"id": "edges_errors", "name": "Границы и ошибки", "points": 4},
+        {"id": "verification_recovery", "name": "Проверка и восстановление", "points": 4}
+      ]
+    },
+    {
+      "id": "consistency",
+      "name": "Согласованность",
+      "criteria": [
+        {"id": "internal_consistency", "name": "Внутренняя согласованность", "points": 4},
+        {"id": "cross_document_consistency", "name": "Согласованность между файлами", "points": 4},
+        {"id": "entity_terminology_consistency", "name": "Единые сущности и терминология", "points": 3},
+        {"id": "schema_example_consistency", "name": "Согласованность схем и примеров", "points": 4}
+      ]
+    },
+    {
+      "id": "actionability",
+      "name": "Исполнимость",
+      "criteria": [
+        {"id": "ordered_actions", "name": "Порядок действий", "points": 4},
+        {"id": "decision_branches", "name": "Решения на развилках", "points": 4},
+        {"id": "observable_results", "name": "Наблюдаемые результаты", "points": 4},
+        {"id": "safe_stop_escalation", "name": "Безопасная остановка и эскалация", "points": 3}
+      ]
+    },
+    {
+      "id": "structure_navigation",
+      "name": "Структура и навигация",
+      "criteria": [
+        {"id": "identity_hierarchy", "name": "Идентичность и иерархия", "points": 3},
+        {"id": "navigation", "name": "Навигация", "points": 3},
+        {"id": "links_anchors", "name": "Ссылки и якоря", "points": 2},
+        {"id": "task_findability", "name": "Поиск по задаче", "points": 2}
+      ]
+    },
+    {
+      "id": "maintainability",
+      "name": "Сопровождаемость",
+      "criteria": [
+        {"id": "single_owner", "name": "Один владелец факта", "points": 3},
+        {"id": "duplication_control", "name": "Контроль дублирования", "points": 3},
+        {"id": "lifecycle_change", "name": "Жизненный цикл изменений", "points": 2},
+        {"id": "portability", "name": "Переносимость", "points": 2}
+      ]
+    },
+    {
+      "id": "language_accessibility",
+      "name": "Ясность и доступность",
+      "criteria": [
+        {"id": "clarity", "name": "Ясность", "points": 2},
+        {"id": "normative_language", "name": "Однозначная обязательность", "points": 1},
+        {"id": "format_accessibility", "name": "Доступное форматирование", "points": 1},
+        {"id": "audience_terms", "name": "Термины аудитории", "points": 1}
+      ]
+    }
+  ],
+  "systemic_gates": {
+    "critical_authority_conflict": {"name": "Критический конфликт полномочий", "cap": 39, "minimum_evidence": 2},
+    "operational_contradiction": {"name": "Операционное противоречие", "cap": 59, "minimum_evidence": 2},
+    "missing_core_authority": {"name": "Отсутствует основная authority", "cap": 59, "minimum_evidence": 1},
+    "broken_core_path": {"name": "Неработающий основной путь", "cap": 69, "minimum_evidence": 1},
+    "material_ambiguity": {"name": "Существенная неоднозначность", "cap": 79, "minimum_evidence": 1},
+    "material_primary_source_mismatch": {"name": "Существенное расхождение с первичным источником", "cap": 59, "minimum_evidence": 2}
+  },
+  "levels": [
+    {"minimum": 90, "name": "эталонная"},
+    {"minimum": 80, "name": "надёжная"},
+    {"minimum": 70, "name": "рабочая"},
+    {"minimum": 60, "name": "ограниченно пригодная"},
+    {"minimum": 40, "name": "рискованная"},
+    {"minimum": 0, "name": "непригодная"}
+  ]
+}
