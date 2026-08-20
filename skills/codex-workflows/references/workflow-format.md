@@ -7,6 +7,8 @@ Each workflow is a directory containing `workflow.json` and every referenced JSO
 ```text
 workflow-name/
 ├── workflow.json
+├── agents/                 # v2 pinned role snapshots
+│   └── reviewer.toml
 └── schemas/
     ├── worker.json
     └── synthesis.json
@@ -22,7 +24,7 @@ Use lower-case hyphenated workflow, task, and input identifiers. Schema paths mu
 
 ## Contract
 
-`workflow.json` uses `codex-exec-workflow.v1`:
+`workflow.json` supports `codex-exec-workflow.v1` and `codex-exec-workflow.v2`. Version 1 remains unchanged:
 
 ```json
 {
@@ -60,6 +62,41 @@ Use lower-case hyphenated workflow, task, and input identifiers. Schema paths mu
 
 Required workflow fields are exactly `schema_version`, `workflow_id`, `description`, `max_parallel`, `inputs`, and `tasks`. Supported input types are `string`, `integer`, `number`, `boolean`, `object`, `array`, and `null`.
 
+Version 2 adds one required root field, `agents`, and lets tasks select a pinned project role:
+
+```json
+{
+  "schema_version": "codex-exec-workflow.v2",
+  "workflow_id": "project-review",
+  "description": "Review through a pinned project role.",
+  "max_parallel": 4,
+  "agents": {
+    "adversarial-reviewer": {
+      "project_path": ".codex/agents/adversarial-reviewer.toml",
+      "snapshot_path": "agents/adversarial-reviewer.toml",
+      "sha256": "<byte-exact sha256>",
+      "model": "gpt-5.6-sol",
+      "model_reasoning_effort": "xhigh",
+      "sandbox_mode": "read-only"
+    }
+  },
+  "inputs": {"request": "string"},
+  "tasks": [
+    {
+      "id": "review",
+      "depends_on": [],
+      "prompt": "Review this request: {{ inputs.request }}",
+      "output_schema": "schemas/review.json",
+      "agent": "adversarial-reviewer"
+    }
+  ]
+}
+```
+
+Each managed project TOML and its workflow snapshot contain exactly `name`, `description`, `developer_instructions`, `model`, `model_reasoning_effort`, and `sandbox_mode`. The project path is fixed to `.codex/agents/<name>.toml`; the workflow snapshot is fixed to `agents/<name>.toml`. Validation rejects symlink aliases, path changes, missing files, name mismatch, snapshot or project byte drift, digest mismatch, and pin metadata that differs from the TOML.
+
+An agent-bound task cannot declare task-level `model`, `reasoning_effort`, or `sandbox`. The resolved values come from the pin; execution also passes the pinned `developer_instructions`. A v2 task without `agent` may continue to use direct task settings.
+
 Every task requires `id`, `depends_on`, `prompt`, and `output_schema`. Optional task fields are:
 
 - `foreach`: resolve an array from inputs or a dependency output;
@@ -67,6 +104,7 @@ Every task requires `id`, `depends_on`, `prompt`, and `output_schema`. Optional 
 - `max_items`: enforced fan-out bound from `1` to `10000`; defaults to `1000`;
 - `model` and `reasoning_effort`: override Codex execution settings;
 - `sandbox`: `read-only`, `workspace-write`, or `danger-full-access`; defaults to `read-only`;
+- `agent`: v2-only pinned role name; mutually exclusive with task model, reasoning, and sandbox fields;
 - `cwd`: project-relative task working directory;
 - `timeout_seconds`: positive integer; defaults to `1800`;
 - `retries`: integer from `0` to `10`; defaults to `0`.
@@ -128,6 +166,7 @@ Prefer an input file for arrays or objects:
 python3 "$CLI" workflow list
 python3 "$CLI" workflow show builtin:fanout-synthesize --schemas
 python3 "$CLI" workflow validate builtin:fanout-synthesize
+python3 "$CLI" workflow install builtin:adversarial-plugin-review --name adversarial-plugin-review
 python3 "$CLI" plan builtin:fanout-synthesize --inputs /path/to/inputs.json
 python3 "$CLI" run builtin:fanout-synthesize --inputs /path/to/inputs.json --detach
 ```
@@ -136,7 +175,7 @@ For small values, repeat `--input KEY=JSON`; JSON strings require JSON quotes, w
 
 ## Persisted artifacts
 
-Runs are stored below `PLUGIN_DATA` when set, otherwise below `~/.codex/workflow-governor-data/exec-runs/`, partitioned by a project digest. A run snapshots its workflow and schemas and records:
+Runs are stored below `PLUGIN_DATA` when set, otherwise below `~/.codex/workflow-governor-data/exec-runs/`, partitioned by a project digest. A run snapshots its workflow, schemas, and v2 agent TOML files and records:
 
 - `run.json` and `events.jsonl`;
 - `worker.log` for detached execution;
@@ -144,6 +183,8 @@ Runs are stored below `PLUGIN_DATA` when set, otherwise below `~/.codex/workflow
 - rendered `prompt.txt`;
 - per-attempt `codex-events.jsonl`, `stderr.log`, `attempt.json`, and final response;
 - validated task-level `final.json` files.
+
+`run.json` also records every resolved agent pin. The workflow digest covers `workflow.json`, referenced schemas, and agent snapshot bytes. Agent drift is checked again from the run snapshot before workers start.
 
 Use the same exact `--project-root` for `run`, `status`, `wait`, `result`, and `cancel`, because run lookup is project-scoped. Use these commands rather than depending on storage internals. `wait` exit `2` means its monitoring timeout elapsed and requires another status check. Use artifacts for diagnosis and audit; do not edit them to change run truth.
 

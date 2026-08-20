@@ -484,8 +484,13 @@ class ExecutionTests(ExecRunnerTestCase):
 
 class WorkflowValidationTests(ExecRunnerTestCase):
     def test_builtin_adversarial_plugin_review_validates_and_plans(self) -> None:
+        install_code, _, install_stderr = self.invoke(
+            "workflow", "install", "builtin:adversarial-plugin-review",
+            "--name", "adversarial-plugin-review",
+        )
+        self.assertEqual(install_code, 0, install_stderr)
         code, stdout, stderr = self.invoke(
-            "workflow", "validate", "builtin:adversarial-plugin-review"
+            "workflow", "validate", "project:adversarial-plugin-review"
         )
         self.assertEqual(code, 0, stderr)
         validated = json.loads(stdout)
@@ -496,7 +501,7 @@ class WorkflowValidationTests(ExecRunnerTestCase):
 
         plan_code, plan_stdout, plan_stderr = self.invoke(
             "plan",
-            "builtin:adversarial-plugin-review",
+            "project:adversarial-plugin-review",
             "--input",
             'objective="Review the plugin"',
             "--input",
@@ -514,6 +519,8 @@ class WorkflowValidationTests(ExecRunnerTestCase):
         )
         self.assertEqual(plan["tasks"][0]["fanout_items"], 3)
         self.assertTrue(all(task["sandbox"] == "read-only" for task in plan["tasks"]))
+        self.assertEqual(plan["tasks"][0]["agent"], "adversarial-reviewer")
+        self.assertTrue(all(task["model"] == "gpt-5.6-sol" for task in plan["tasks"]))
 
     def test_non_standard_json_input_is_rejected_before_run_persistence(self) -> None:
         workflow = self.write_workflow(
@@ -552,7 +559,7 @@ class WorkflowValidationTests(ExecRunnerTestCase):
         code, _, stderr = self.invoke("workflow", "validate", "project:escaped")
 
         self.assertEqual(code, 2)
-        self.assertIn("resolves outside", stderr)
+        self.assertIn("symlink aliasing is not allowed", stderr)
 
     def test_cycle_is_rejected(self) -> None:
         workflow = self.write_workflow(

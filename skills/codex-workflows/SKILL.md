@@ -16,6 +16,13 @@ Resolve `scripts/codex_workflows.py` relative to this `SKILL.md` and use that ab
 
 Read [methodology.md](references/methodology.md) before creating or materially changing a workflow. Read [workflow-format.md](references/workflow-format.md) when editing `workflow.json`, schemas, inputs, or templates.
 
+## Choose task configuration
+
+- Use direct task `model`, `reasoning_effort`, and `sandbox` fields for a portable v1 workflow or a task that does not need a reusable project role.
+- Use a pinned project agent when role instructions and execution settings must be reviewed, reused, and drift-checked as one unit. Install or bind the role, inspect the resolved agent in `plan`, and do not run while validation reports pin drift.
+
+Read [project-agents.md](references/project-agents.md) before creating, updating, registering, repinning, binding, or installing project agents.
+
 ## Operate a workflow
 
 Choose one exact project root and reuse it for the entire run. Always validate and plan with the real inputs before starting workers:
@@ -60,6 +67,13 @@ python3 "$CLI" --project-root "$PROJECT" workflow save project:my-workflow my-wo
 Never use `--force` until the existing target has been shown and the replacement is intentional.
 
 Run artifacts and inputs are saved automatically; `workflow save` saves only a workflow definition. For repeatability, retain the run ID, exact project root, qualified workflow reference, workflow digest printed by `plan`, and input file. Copy a built-in into project scope before running when later plugin updates must not change the selected definition.
+
+Built-ins that bundle project agents use `workflow install`, which registers matching roles and fails closed on conflicts:
+
+```bash
+python3 "$CLI" --project-root "$PROJECT" workflow install builtin:adversarial-plugin-review --name adversarial-plugin-review
+python3 "$CLI" --project-root "$PROJECT" workflow validate project:adversarial-plugin-review
+```
 
 ## Safety and correctness
 

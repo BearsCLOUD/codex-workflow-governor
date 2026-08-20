@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0 — 2026-08-20
+
+### Added
+
+- Added `codex-exec-workflow.v2` with byte-exact project-agent pins, workflow snapshots, drift detection, and resolved execution metadata while retaining full v1 support.
+- Added `agent list|show|validate|schema|register|create|update|repin`, strict external/generated authoring specs, dry runs, transactional multi-workflow repinning, and concurrent-update detection.
+- Added `workflow bind-agent` and conflict-safe `workflow install` support for bundled project roles.
+
+### Changed
+
+- Migrated `adversarial-plugin-review` to three pinned `gpt-5.6-sol`, `xhigh`, read-only project roles; all six review lenses use `adversarial-reviewer`.
+- Agent-bound workers now receive pinned model, reasoning, developer instructions, and sandbox values through explicit `codex exec` arguments.
+- Kept `fanout-synthesize` on v1 and kept lifecycle MCP and hook registrations outside the bundled plugin.
+
 ## 0.4.0 — 2026-08-20
 
 ### Added

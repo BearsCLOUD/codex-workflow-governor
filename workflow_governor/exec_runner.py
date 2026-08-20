@@ -16,8 +16,17 @@ sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 
 EXEC_WORKFLOW_SCHEMA = _MODULE.EXEC_WORKFLOW_SCHEMA
+EXEC_WORKFLOW_SCHEMA_V1 = _MODULE.EXEC_WORKFLOW_SCHEMA_V1
+EXEC_WORKFLOW_SCHEMA_V2 = _MODULE.EXEC_WORKFLOW_SCHEMA_V2
 execute_run = _MODULE.execute_run
 load_workflow = _MODULE.load_workflow
 main = _MODULE.main
 
-__all__ = ["EXEC_WORKFLOW_SCHEMA", "execute_run", "load_workflow", "main"]
+__all__ = [
+    "EXEC_WORKFLOW_SCHEMA",
+    "EXEC_WORKFLOW_SCHEMA_V1",
+    "EXEC_WORKFLOW_SCHEMA_V2",
+    "execute_run",
+    "load_workflow",
+    "main",
+]

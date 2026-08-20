@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import contextlib
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -63,7 +65,10 @@ except ModuleNotFoundError:
         return values
 
 
-EXEC_WORKFLOW_SCHEMA = "codex-exec-workflow.v1"
+EXEC_WORKFLOW_SCHEMA_V1 = "codex-exec-workflow.v1"
+EXEC_WORKFLOW_SCHEMA_V2 = "codex-exec-workflow.v2"
+EXEC_WORKFLOW_SCHEMA = EXEC_WORKFLOW_SCHEMA_V1
+EXEC_WORKFLOW_SCHEMAS = {EXEC_WORKFLOW_SCHEMA_V1, EXEC_WORKFLOW_SCHEMA_V2}
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 RUN_IDENTIFIER = re.compile(r"^exec_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
 PLACEHOLDER = re.compile(r"{{\s*([^{}]+?)\s*}}")
@@ -75,6 +80,24 @@ MAX_FANOUT_ITEMS = 10_000
 MAX_TASKS = 256
 DEFAULT_MAX_CALLS = 5_000
 MAX_CALLS = 100_000
+AGENT_FIELDS = {
+    "name", "description", "developer_instructions", "model",
+    "model_reasoning_effort", "sandbox_mode",
+}
+AGENT_PIN_FIELDS = {
+    "project_path", "snapshot_path", "sha256", "model",
+    "model_reasoning_effort", "sandbox_mode",
+}
+AGENT_SPEC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "developer_instructions": {"type": "string"},
+    },
+    "required": ["name", "description", "developer_instructions"],
+    "additionalProperties": False,
+}
 
 
 def utc_now() -> str:
@@ -146,6 +169,10 @@ def _project_workflows_root(project: Path) -> Path:
     return _contained(project, project / ".codex" / "exec-workflows", "project workflow root")
 
 
+def _project_agents_root(project: Path) -> Path:
+    return _contained(project, project / ".codex" / "agents", "project agents root")
+
+
 def _builtin_workflows_root() -> Path:
     return Path(__file__).resolve().parent.parent / "assets" / "workflows"
 
@@ -169,6 +196,86 @@ def _contained(root: Path, candidate: Path, label: str) -> Path:
     if resolved_candidate != resolved_root and resolved_root not in resolved_candidate.parents:
         raise ContractError(label, f"resolves outside {resolved_root}")
     return resolved_candidate
+
+
+def _reject_symlink_alias(root: Path, candidate: Path, label: str) -> None:
+    """Reject every existing symlink component between root and candidate."""
+    lexical_root = root.expanduser().absolute()
+    lexical_candidate = candidate.expanduser().absolute()
+    try:
+        relative = lexical_candidate.relative_to(lexical_root)
+    except ValueError as exc:
+        raise ContractError(label, f"is outside {lexical_root}") from exc
+    current = lexical_root
+    if current.is_symlink():
+        raise ContractError(label, f"symlink aliasing is not allowed: {current}")
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ContractError(label, f"symlink aliasing is not allowed: {current}")
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_toml_bytes(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
+    try:
+        payload = path.read_bytes()
+        value = tomllib.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ContractError(label, str(exc)) from exc
+    if not isinstance(value, dict):
+        raise ContractError(label, "must be a TOML table")
+    return value, payload
+
+
+def _validate_agent_value(value: Mapping[str, Any], label: str, *, expected_name: str | None = None) -> dict[str, str]:
+    _require_keys(value, label, AGENT_FIELDS)
+    normalized: dict[str, str] = {}
+    for field in AGENT_FIELDS:
+        item = value[field]
+        if not isinstance(item, str) or not item.strip():
+            raise ContractError(f"{label}.{field}", "must be a non-empty string")
+        normalized[field] = item
+    if not IDENTIFIER.fullmatch(normalized["name"]):
+        raise ContractError(f"{label}.name", "must be a lower-case hyphenated identifier")
+    if expected_name is not None and normalized["name"] != expected_name:
+        raise ContractError(f"{label}.name", f"must equal {expected_name!r}")
+    if normalized["sandbox_mode"] not in SANDBOXES:
+        raise ContractError(f"{label}.sandbox_mode", f"must be one of {sorted(SANDBOXES)}")
+    return normalized
+
+
+def _load_agent_file(path: Path, label: str, *, expected_name: str | None = None) -> tuple[dict[str, str], bytes]:
+    value, payload = _read_toml_bytes(path, label)
+    return _validate_agent_value(value, label, expected_name=expected_name), payload
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _agent_toml(value: Mapping[str, str]) -> bytes:
+    lines = [f"{field} = {_toml_string(value[field])}" for field in (
+        "name", "description", "developer_instructions", "model",
+        "model_reasoning_effort", "sandbox_mode",
+    )]
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+    parsed = tomllib.loads(payload.decode("utf-8"))
+    _validate_agent_value(parsed, "agent")
+    return payload
+
+
+def _agent_pin(name: str, value: Mapping[str, str], payload: bytes) -> dict[str, str]:
+    return {
+        "project_path": f".codex/agents/{name}.toml",
+        "snapshot_path": f"agents/{name}.toml",
+        "sha256": _sha256_bytes(payload),
+        "model": value["model"],
+        "model_reasoning_effort": value["model_reasoning_effort"],
+        "sandbox_mode": value["sandbox_mode"],
+    }
 
 
 def _scope_root(scope: str, project: Path) -> Path:
@@ -204,7 +311,9 @@ def resolve_workflow(reference: str, project: Path) -> tuple[str, Path]:
         raise ContractError("workflow", "name must be a lower-case hyphenated identifier")
     for scope in scopes:
         root = _scope_root(scope, project)
-        path = _contained(root, root / name / "workflow.json", f"{scope} workflow")
+        lexical_path = root / name / "workflow.json"
+        _reject_symlink_alias(root, lexical_path, f"{scope} workflow")
+        path = _contained(root, lexical_path, f"{scope} workflow")
         if path.is_file():
             return scope, path
     raise ContractError("workflow", f"unknown workflow {reference!r}")
@@ -381,17 +490,112 @@ def _validate_expression(
     raise ContractError(f"workflow.tasks.{task_id}", f"unknown expression {expression!r}")
 
 
-def load_workflow(path: Path) -> dict[str, Any]:
+def _load_workflow_agents(
+    raw: Mapping[str, Any],
+    path: Path,
+    project: Path | None,
+    *,
+    validate_project_agents: bool,
+) -> dict[str, dict[str, Any]]:
+    agents_raw = raw.get("agents")
+    if not isinstance(agents_raw, dict):
+        raise ContractError("workflow.agents", "must be an object")
+    workflow_root = path.parent.absolute()
+    agents: dict[str, dict[str, Any]] = {}
+    for name, pin_raw in agents_raw.items():
+        label = f"workflow.agents.{name}"
+        if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
+            raise ContractError("workflow.agents", f"invalid agent name {name!r}")
+        if not isinstance(pin_raw, dict):
+            raise ContractError(label, "must be an object")
+        _require_keys(pin_raw, label, AGENT_PIN_FIELDS)
+        for field in AGENT_PIN_FIELDS:
+            if not isinstance(pin_raw[field], str) or not pin_raw[field]:
+                raise ContractError(f"{label}.{field}", "must be a non-empty string")
+        expected_project = f".codex/agents/{name}.toml"
+        expected_snapshot = f"agents/{name}.toml"
+        if pin_raw["project_path"] != expected_project:
+            raise ContractError(f"{label}.project_path", f"must equal {expected_project!r}")
+        if pin_raw["snapshot_path"] != expected_snapshot:
+            raise ContractError(f"{label}.snapshot_path", f"must equal {expected_snapshot!r}")
+        if not re.fullmatch(r"[0-9a-f]{64}", pin_raw["sha256"]):
+            raise ContractError(f"{label}.sha256", "must be a lower-case SHA-256 digest")
+        if pin_raw["sandbox_mode"] not in SANDBOXES:
+            raise ContractError(f"{label}.sandbox_mode", f"must be one of {sorted(SANDBOXES)}")
+
+        snapshot_path = workflow_root / pin_raw["snapshot_path"]
+        _reject_symlink_alias(workflow_root, snapshot_path, f"{label}.snapshot_path")
+        resolved_snapshot = _contained(workflow_root, snapshot_path, f"{label}.snapshot_path")
+        if not resolved_snapshot.is_file():
+            raise ContractError(f"{label}.snapshot_path", "does not resolve to a workflow file")
+        snapshot_value, snapshot_payload = _load_agent_file(
+            resolved_snapshot, f"{label}.snapshot", expected_name=name
+        )
+        snapshot_digest = _sha256_bytes(snapshot_payload)
+        if snapshot_digest != pin_raw["sha256"]:
+            raise ContractError(f"{label}.sha256", "does not match the workflow agent snapshot")
+        for pin_field, role_field in (
+            ("model", "model"),
+            ("model_reasoning_effort", "model_reasoning_effort"),
+            ("sandbox_mode", "sandbox_mode"),
+        ):
+            if pin_raw[pin_field] != snapshot_value[role_field]:
+                raise ContractError(f"{label}.{pin_field}", "does not match the workflow agent snapshot")
+
+        project_path: Path | None = None
+        if project is not None and validate_project_agents:
+            project_root = project.absolute()
+            project_path = project_root / pin_raw["project_path"]
+            _reject_symlink_alias(project_root, project_path, f"{label}.project_path")
+            resolved_project = _contained(project_root, project_path, f"{label}.project_path")
+            if not resolved_project.is_file():
+                raise ContractError(f"{label}.project_path", "does not resolve to a project agent file")
+            project_value, project_payload = _load_agent_file(
+                resolved_project, f"{label}.project", expected_name=name
+            )
+            if _sha256_bytes(project_payload) != pin_raw["sha256"]:
+                raise ContractError(f"{label}.sha256", "does not match the project agent file")
+            if project_value != snapshot_value:
+                raise ContractError(label, "project agent metadata does not match the workflow snapshot")
+            project_path = resolved_project
+        agents[name] = {
+            **pin_raw,
+            "description": snapshot_value["description"],
+            "developer_instructions": snapshot_value["developer_instructions"],
+            "_snapshot_path": resolved_snapshot,
+            "_project_path": project_path,
+        }
+    return agents
+
+
+def load_workflow(
+    path: Path,
+    project: Path | None = None,
+    *,
+    validate_project_agents: bool = True,
+) -> dict[str, Any]:
     raw = _read_json(path)
     if not isinstance(raw, dict):
         raise ContractError("workflow", "must be an object")
+    schema_version = raw.get("schema_version")
+    if schema_version not in EXEC_WORKFLOW_SCHEMAS:
+        raise ContractError(
+            "workflow.schema_version",
+            f"must be one of {sorted(EXEC_WORKFLOW_SCHEMAS)}",
+        )
+    required = {"schema_version", "workflow_id", "description", "max_parallel", "inputs", "tasks"}
+    if schema_version == EXEC_WORKFLOW_SCHEMA_V2:
+        required.add("agents")
     _require_keys(
         raw,
         "workflow",
-        {"schema_version", "workflow_id", "description", "max_parallel", "inputs", "tasks"},
+        required,
     )
-    if raw["schema_version"] != EXEC_WORKFLOW_SCHEMA:
-        raise ContractError("workflow.schema_version", f"must equal {EXEC_WORKFLOW_SCHEMA}")
+    agents = (
+        _load_workflow_agents(raw, path, project, validate_project_agents=validate_project_agents)
+        if schema_version == EXEC_WORKFLOW_SCHEMA_V2
+        else {}
+    )
     workflow_id = raw["workflow_id"]
     if not isinstance(workflow_id, str) or not IDENTIFIER.fullmatch(workflow_id):
         raise ContractError("workflow.workflow_id", "must be a lower-case hyphenated identifier")
@@ -414,7 +618,7 @@ def load_workflow(path: Path) -> dict[str, Any]:
     tasks: dict[str, dict[str, Any]] = {}
     allowed_optional = {
         "foreach", "item_name", "model", "reasoning_effort", "sandbox", "cwd",
-        "timeout_seconds", "retries", "max_items",
+        "timeout_seconds", "retries", "max_items", "agent",
     }
     root = path.parent.resolve()
     for index, item in enumerate(raw["tasks"]):
@@ -451,7 +655,23 @@ def load_workflow(path: Path) -> dict[str, Any]:
         item_name = item.get("item_name", "item")
         if not isinstance(item_name, str) or not IDENTIFIER.fullmatch(item_name):
             raise ContractError(f"{task_path}.item_name", "must be a lower-case hyphenated identifier")
-        sandbox = item.get("sandbox", "read-only")
+        agent_name = item.get("agent")
+        if "agent" in item:
+            if schema_version != EXEC_WORKFLOW_SCHEMA_V2:
+                raise ContractError(f"{task_path}.agent", "requires codex-exec-workflow.v2")
+            if not isinstance(agent_name, str) or agent_name not in agents:
+                raise ContractError(f"{task_path}.agent", "must name a pinned workflow agent")
+            conflicts = sorted({"model", "reasoning_effort", "sandbox"} & set(item))
+            if conflicts:
+                raise ContractError(
+                    task_path,
+                    f"agent-bound tasks cannot override: {', '.join(conflicts)}",
+                )
+            bound_agent = agents[agent_name]
+            sandbox = bound_agent["sandbox_mode"]
+        else:
+            bound_agent = None
+            sandbox = item.get("sandbox", "read-only")
         if sandbox not in SANDBOXES:
             raise ContractError(f"{task_path}.sandbox", f"must be one of {sorted(SANDBOXES)}")
         timeout = item.get("timeout_seconds", 1800)
@@ -478,6 +698,12 @@ def load_workflow(path: Path) -> dict[str, Any]:
             "timeout_seconds": timeout,
             "retries": retries,
             "max_items": max_items,
+            "model": bound_agent["model"] if bound_agent else item.get("model"),
+            "reasoning_effort": (
+                bound_agent["model_reasoning_effort"] if bound_agent else item.get("reasoning_effort")
+            ),
+            "developer_instructions": bound_agent["developer_instructions"] if bound_agent else None,
+            "_agent": bound_agent,
             "_schema": schema,
             "_schema_path": schema_path,
         }
@@ -530,11 +756,12 @@ def load_workflow(path: Path) -> dict[str, Any]:
             if value_type not in {None, "array"}:
                 raise ContractError(f"workflow.tasks.{task_id}.foreach", "must resolve to an array")
     return {
-        "schema_version": EXEC_WORKFLOW_SCHEMA,
+        "schema_version": schema_version,
         "workflow_id": workflow_id,
         "description": raw["description"],
         "max_parallel": max_parallel,
         "inputs": dict(sorted(inputs.items())),
+        "agents": agents,
         "tasks": tasks,
         "order": visited,
         "path": path.resolve(),
@@ -585,11 +812,30 @@ def _workflow_digest(workflow: Mapping[str, Any]) -> str:
         task["output_schema"]: digest_json(_read_json(task["_schema_path"]))
         for task in workflow["tasks"].values()
     }
-    return digest_json({"workflow": _read_json(workflow["path"]), "schemas": dict(sorted(schemas.items()))})
+    material: dict[str, Any] = {
+        "workflow": _read_json(workflow["path"]),
+        "schemas": dict(sorted(schemas.items())),
+    }
+    if workflow["schema_version"] == EXEC_WORKFLOW_SCHEMA_V2:
+        agents = {
+            agent["snapshot_path"]: _sha256_bytes(Path(agent["_snapshot_path"]).read_bytes())
+            for agent in workflow.get("agents", {}).values()
+        }
+        material["agents"] = dict(sorted(agents.items()))
+    return digest_json(material)
 
 
-def _copy_workflow(source: Path, target: Path, *, workflow_id: str | None = None) -> None:
-    workflow = load_workflow(source)
+def _copy_workflow(
+    source: Path,
+    target: Path,
+    *,
+    workflow_id: str | None = None,
+    project: Path | None = None,
+    validate_project_agents: bool = True,
+) -> None:
+    workflow = load_workflow(
+        source, project, validate_project_agents=validate_project_agents
+    )
     target.mkdir(parents=True, exist_ok=False)
     source_value = _read_json(source)
     if workflow_id is not None:
@@ -604,7 +850,15 @@ def _copy_workflow(source: Path, target: Path, *, workflow_id: str | None = None
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(task["_schema_path"], destination)
         copied.add(relative.as_posix())
-    load_workflow(target / "workflow.json")
+    for agent in workflow.get("agents", {}).values():
+        destination = target / agent["snapshot_path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(agent["_snapshot_path"], destination)
+    load_workflow(
+        target / "workflow.json",
+        project,
+        validate_project_agents=validate_project_agents,
+    )
 
 
 def _parse_input_values(input_file: str | None, pairs: list[str]) -> dict[str, Any]:
@@ -666,6 +920,19 @@ def _execution_plan(workflow: Mapping[str, Any], inputs: Mapping[str, Any]) -> t
                 "cwd": task.get("cwd", "."),
                 "model": task.get("model"),
                 "reasoning_effort": task.get("reasoning_effort"),
+                "agent": task.get("agent"),
+                "agent_sha256": task.get("_agent", {}).get("sha256") if task.get("_agent") else None,
+                "resolved_agent": (
+                    {
+                        "name": task["agent"],
+                        "sha256": task["_agent"]["sha256"],
+                        "model": task["model"],
+                        "model_reasoning_effort": task["reasoning_effort"],
+                        "sandbox_mode": task["sandbox"],
+                    }
+                    if task.get("_agent")
+                    else None
+                ),
                 "timeout_seconds": task["timeout_seconds"],
                 "retries": task["retries"],
             }
@@ -767,7 +1034,15 @@ async def _run_one(
         if task.get("model"):
             command.extend(["--model", str(task["model"])])
         if task.get("reasoning_effort"):
-            command.extend(["--config", f'model_reasoning_effort="{task["reasoning_effort"]}"'])
+            command.extend([
+                "--config",
+                f'model_reasoning_effort={_toml_string(str(task["reasoning_effort"]))}',
+            ])
+        if task.get("developer_instructions"):
+            command.extend([
+                "--config",
+                f'developer_instructions={_toml_string(str(task["developer_instructions"]))}',
+            ])
         cwd = (project / task.get("cwd", ".")).resolve()
         if not cwd.is_dir() or (cwd != project and project not in cwd.parents):
             return False, None, f"cwd escapes project or is missing: {cwd}"
@@ -864,11 +1139,11 @@ async def _run_one(
 async def _execute_run(run_dir: Path) -> int:
     state = _read_json(run_dir / "run.json")
     store = RunStore(run_dir, state)
-    workflow = load_workflow(run_dir / "workflow" / "workflow.json")
+    project = Path(state["project_root"])
+    workflow = load_workflow(run_dir / "workflow" / "workflow.json", project)
     if _workflow_digest(workflow) != state.get("workflow_digest"):
         raise ContractError("run.workflow_digest", "snapshot no longer matches queued run authority")
     inputs = state["inputs"]
-    project = Path(state["project_root"])
     codex_bin = state["codex_bin"]
     semaphore = asyncio.Semaphore(state["max_parallel"])
     write_lock = asyncio.Lock()
@@ -1010,12 +1285,13 @@ async def _execute_run(run_dir: Path) -> int:
         try:
             await run_task_inner(task_id)
         except Exception as exc:
+            error_message = str(exc)
             await store.update(
                 lambda current: current["tasks"][task_id].update(
-                    {"status": "failed", "error": str(exc), "finished_at": utc_now()}
+                    {"status": "failed", "error": error_message, "finished_at": utc_now()}
                 )
             )
-            await store.event("task.failed", {"task_id": task_id, "error": str(exc)})
+            await store.event("task.failed", {"task_id": task_id, "error": error_message})
         finally:
             try:
                 status = store.state["tasks"][task_id]["status"]
@@ -1107,8 +1383,8 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
     run_dir = _runs_root(project) / run_id
     run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
     try:
-        _copy_workflow(source, run_dir / "workflow")
-        workflow = load_workflow(run_dir / "workflow" / "workflow.json")
+        _copy_workflow(source, run_dir / "workflow", project=project)
+        workflow = load_workflow(run_dir / "workflow" / "workflow.json", project)
         validate_typed_values(inputs, workflow["inputs"], "inputs")
         planned_tasks, planned_calls = _execution_plan(workflow, inputs)
         if planned_calls > args.max_calls:
@@ -1132,6 +1408,16 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
         "workflow_id": workflow["workflow_id"],
         "workflow_scope": scope,
         "workflow_digest": _workflow_digest(workflow),
+        "agents": {
+            name: {
+                field: agent[field]
+                for field in (
+                    "project_path", "snapshot_path", "sha256", "model",
+                    "model_reasoning_effort", "sandbox_mode",
+                )
+            }
+            for name, agent in sorted(workflow.get("agents", {}).items())
+        },
         "project_root": str(project),
         "inputs": inputs,
         "codex_bin": args.codex_bin,
@@ -1209,6 +1495,301 @@ def _template_schema() -> dict[str, Any]:
     }
 
 
+def _atomic_batch(updates: Mapping[Path, bytes]) -> None:
+    """Apply a validated file batch and restore byte-exact preimages on error."""
+    preimages: dict[Path, bytes | None] = {}
+    applied: list[Path] = []
+    missing_directories: set[Path] = set()
+    try:
+        for path in sorted(updates, key=lambda item: str(item)):
+            current = path.parent
+            while not current.exists():
+                missing_directories.add(current)
+                current = current.parent
+            preimages[path] = path.read_bytes() if path.exists() else None
+            _atomic_text(path, updates[path].decode("utf-8"))
+            applied.append(path)
+    except Exception:
+        for path in reversed(applied):
+            previous = preimages[path]
+            try:
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _atomic_text(path, previous.decode("utf-8"))
+            except OSError:
+                pass
+        for directory in sorted(missing_directories, key=lambda item: len(item.parts), reverse=True):
+            with contextlib.suppress(OSError):
+                directory.rmdir()
+        raise
+
+
+def _agent_path(project: Path, name: str) -> Path:
+    if not IDENTIFIER.fullmatch(name):
+        raise ContractError("agent", "name must be a lower-case hyphenated identifier")
+    root = _project_agents_root(project)
+    path = root / f"{name}.toml"
+    _reject_symlink_alias(project.absolute(), path, "agent")
+    return _contained(root, path, "agent")
+
+
+def _read_agent_spec(source: str, expected_name: str) -> dict[str, str]:
+    try:
+        text = sys.stdin.read() if source == "-" else Path(source).expanduser().read_text(encoding="utf-8")
+        value = json.loads(text, parse_constant=_reject_json_constant)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ContractError("agent spec", str(exc)) from exc
+    _validate_instance(value, AGENT_SPEC_SCHEMA, "agent spec")
+    assert isinstance(value, dict)
+    for field in ("name", "description", "developer_instructions"):
+        if not value[field].strip():
+            raise ContractError(f"agent spec.{field}", "must be a non-empty string")
+    if value["name"] != expected_name:
+        raise ContractError("agent spec.name", f"must equal {expected_name!r}")
+    return {field: value[field] for field in ("name", "description", "developer_instructions")}
+
+
+def _generate_agent_spec(args: argparse.Namespace, project: Path) -> dict[str, str]:
+    schema_dir = Path(tempfile.mkdtemp(prefix="codex-agent-generator-"))
+    try:
+        schema_path = schema_dir / "agent-spec.schema.json"
+        final_path = schema_dir / "final.json"
+        _atomic_json(schema_path, AGENT_SPEC_SCHEMA)
+        command = [
+            args.codex_bin, "exec", "--ephemeral", "--json", "--color", "never",
+            "--output-schema", str(schema_path),
+            "--output-last-message", str(final_path),
+            "--sandbox", "read-only",
+        ]
+        if args.generator_model:
+            command.extend(["--model", args.generator_model])
+        if args.generator_reasoning_effort:
+            command.extend([
+                "--config",
+                f'model_reasoning_effort={_toml_string(args.generator_reasoning_effort)}',
+            ])
+        command.extend(["--cd", str(project), "-"])
+        prompt = (
+            "Author a narrow Codex custom-agent specification as strict JSON. "
+            "The name must be exactly the requested name. Return only name, description, "
+            "and developer_instructions; do not include model or sandbox settings.\n\n"
+            f"Requested name: {args.name}\nAuthoring request:\n{args.generate}\n"
+        )
+        completed = subprocess.run(
+            command,
+            cwd=project,
+            input=prompt.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            error = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise ContractError("agent generator", f"codex exec exited with {completed.returncode}: {error}")
+        if not final_path.is_file():
+            raise ContractError("agent generator", "codex exec did not write a final response")
+        value = _read_json(final_path)
+        _validate_instance(value, AGENT_SPEC_SCHEMA, "agent generator output")
+        if not isinstance(value, dict) or value.get("name") != args.name:
+            raise ContractError("agent generator output.name", f"must equal {args.name!r}")
+        for field in ("name", "description", "developer_instructions"):
+            if not isinstance(value[field], str) or not value[field].strip():
+                raise ContractError(f"agent generator output.{field}", "must be a non-empty string")
+        return {field: value[field] for field in ("name", "description", "developer_instructions")}
+    except OSError as exc:
+        raise ContractError("agent generator", str(exc)) from exc
+    finally:
+        shutil.rmtree(schema_dir, ignore_errors=True)
+
+
+def _stage_workflow_value(
+    workflow_path: Path,
+    workflow_value: Mapping[str, Any],
+    snapshots: Mapping[str, bytes],
+) -> None:
+    """Validate a proposed workflow and snapshots without consulting project pins."""
+    with tempfile.TemporaryDirectory(prefix="codex-workflow-stage-") as temporary:
+        staged = Path(temporary) / workflow_path.parent.name
+        shutil.copytree(workflow_path.parent, staged, symlinks=True)
+        _atomic_json(staged / "workflow.json", workflow_value)
+        for relative, payload in snapshots.items():
+            _atomic_text(staged / relative, payload.decode("utf-8"))
+        load_workflow(
+            staged / "workflow.json",
+            validate_project_agents=False,
+        )
+
+
+def _repin_many_updates(
+    project: Path,
+    roles: Mapping[str, tuple[Mapping[str, str], bytes]],
+) -> dict[Path, bytes]:
+    updates: dict[Path, bytes] = {}
+    root = _project_workflows_root(project)
+    if not root.is_dir():
+        return updates
+    for workflow_path in sorted(root.glob("*/workflow.json")):
+        _reject_symlink_alias(root, workflow_path, "project workflow")
+        workflow_path = _contained(root, workflow_path, "project workflow")
+        raw = _read_json(workflow_path)
+        if not isinstance(raw, dict) or raw.get("schema_version") != EXEC_WORKFLOW_SCHEMA_V2:
+            continue
+        agents = raw.get("agents")
+        if not isinstance(agents, dict) or not (set(roles) & set(agents)):
+            continue
+        updated = json.loads(json.dumps(raw))
+        snapshots: dict[str, bytes] = {}
+        for name in sorted(set(roles) & set(agents)):
+            value, payload = roles[name]
+            pin = _agent_pin(name, value, payload)
+            updated["agents"][name] = pin
+            snapshots[pin["snapshot_path"]] = payload
+        _stage_workflow_value(workflow_path, updated, snapshots)
+        updates[workflow_path] = (
+            json.dumps(updated, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        for relative, payload in snapshots.items():
+            updates[workflow_path.parent / relative] = payload
+    return updates
+
+
+def _repin_updates(project: Path, name: str, value: Mapping[str, str], payload: bytes) -> dict[Path, bytes]:
+    return _repin_many_updates(project, {name: (value, payload)})
+
+
+def _agent_output(name: str, value: Mapping[str, str], payload: bytes, paths: list[Path], dry_run: bool) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "name": name,
+        "sha256": _sha256_bytes(payload),
+        "model": value["model"],
+        "model_reasoning_effort": value["model_reasoning_effort"],
+        "sandbox_mode": value["sandbox_mode"],
+        "paths": [str(path) for path in sorted(paths, key=lambda item: str(item))],
+    }
+
+
+def _emit_mutation(result: Mapping[str, Any], json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+    else:
+        action = "would update" if result.get("dry_run") else "updated"
+        print(f"{action} {result.get('name', result.get('workflow_id', 'files'))}")
+        for path in result.get("paths", []):
+            print(f"  {path}")
+
+
+def _bind_agent_updates(
+    project: Path, workflow_path: Path, task_id: str, name: str
+) -> tuple[dict[Path, bytes], dict[str, Any]]:
+    root = _project_workflows_root(project)
+    _reject_symlink_alias(root, workflow_path, "project workflow")
+    workflow_path = _contained(root, workflow_path, "project workflow")
+    value, payload = _load_agent_file(_agent_path(project, name), "agent", expected_name=name)
+    raw = _read_json(workflow_path)
+    if not isinstance(raw, dict):
+        raise ContractError("workflow", "must be an object")
+    load_workflow(workflow_path, project)
+    updated = json.loads(json.dumps(raw))
+    if updated.get("schema_version") == EXEC_WORKFLOW_SCHEMA_V1:
+        updated["schema_version"] = EXEC_WORKFLOW_SCHEMA_V2
+        updated["agents"] = {}
+    if updated.get("schema_version") != EXEC_WORKFLOW_SCHEMA_V2 or not isinstance(updated.get("agents"), dict):
+        raise ContractError("workflow", "bind-agent supports workflow v1 or v2")
+    tasks = updated.get("tasks")
+    if not isinstance(tasks, list):
+        raise ContractError("workflow.tasks", "must be an array")
+    selected = next((task for task in tasks if isinstance(task, dict) and task.get("id") == task_id), None)
+    if selected is None:
+        raise ContractError("task", f"unknown task {task_id!r}")
+    selected["agent"] = name
+    for field in ("model", "reasoning_effort", "sandbox"):
+        selected.pop(field, None)
+    pin = _agent_pin(name, value, payload)
+    updated["agents"][name] = pin
+    _stage_workflow_value(workflow_path, updated, {pin["snapshot_path"]: payload})
+    updates = {
+        workflow_path: (
+            json.dumps(updated, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8"),
+        workflow_path.parent / pin["snapshot_path"]: payload,
+    }
+    return updates, updated
+
+
+def _install_workflow_updates(
+    project: Path,
+    source_reference: str,
+    target_name: str,
+    *,
+    replace_agents: bool,
+) -> tuple[dict[Path, bytes], dict[str, Any]]:
+    if not IDENTIFIER.fullmatch(target_name):
+        raise ContractError("name", "must be a lower-case hyphenated identifier")
+    scope, source = resolve_workflow(source_reference, project)
+    if scope != "builtin":
+        raise ContractError("workflow install", "source must be a qualified builtin:NAME reference")
+    workflow = load_workflow(source, validate_project_agents=False)
+    target_root = _project_workflows_root(project)
+    target = target_root / target_name
+    _reject_symlink_alias(project.absolute(), target, "project workflow")
+    target = _contained(target_root, target, "project workflow")
+    if target.exists():
+        raise ContractError("workflow", f"already exists: {target}")
+
+    raw = _read_json(source)
+    assert isinstance(raw, dict)
+    raw["workflow_id"] = target_name
+    updates: dict[Path, bytes] = {}
+    for path in sorted(source.parent.rglob("*")):
+        if path.is_symlink():
+            raise ContractError("workflow install", f"bundled workflow contains a symlink: {path}")
+        if path.is_file():
+            relative = path.relative_to(source.parent)
+            updates[target / relative] = path.read_bytes()
+    updates[target / "workflow.json"] = (
+        json.dumps(raw, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+
+    roles: list[str] = []
+    replacement_roles: dict[str, tuple[Mapping[str, str], bytes]] = {}
+    for name, agent in sorted(workflow.get("agents", {}).items()):
+        roles.append(name)
+        payload = Path(agent["_snapshot_path"]).read_bytes()
+        value = _validate_agent_value(
+            tomllib.loads(payload.decode("utf-8")), "bundled agent", expected_name=name
+        )
+        destination = _agent_path(project, name)
+        if destination.exists():
+            current = destination.read_bytes()
+            if current != payload:
+                if not replace_agents:
+                    raise ContractError(
+                        "workflow install",
+                        f"project agent {name!r} conflicts with the bundled role; use --replace-agents",
+                    )
+                updates[destination] = payload
+                replacement_roles[name] = (value, payload)
+        else:
+            updates[destination] = payload
+    updates.update(_repin_many_updates(project, replacement_roles))
+
+    with tempfile.TemporaryDirectory(prefix="codex-workflow-install-") as temporary:
+        staged = Path(temporary) / target_name
+        shutil.copytree(source.parent, staged, symlinks=True)
+        _atomic_json(staged / "workflow.json", raw)
+        load_workflow(staged / "workflow.json", validate_project_agents=False)
+    return updates, {
+        "ok": True,
+        "workflow_id": target_name,
+        "source": source_reference,
+        "agents": roles,
+        "paths": [str(path) for path in sorted(updates, key=lambda item: str(item))],
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="codex-workflows", description=__doc__)
     parser.add_argument("--project-root", help="Repository or project root; defaults to the current Git root")
@@ -1230,6 +1811,49 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--schemas", action="store_true", help="Include every referenced output schema")
     validate = workflow_commands.add_parser("validate")
     validate.add_argument("workflow")
+    install = workflow_commands.add_parser("install")
+    install.add_argument("source")
+    install.add_argument("--name", required=True)
+    install.add_argument("--replace-agents", action="store_true")
+    install.add_argument("--dry-run", action="store_true")
+    install.add_argument("--json", action="store_true")
+    bind = workflow_commands.add_parser("bind-agent")
+    bind.add_argument("workflow")
+    bind.add_argument("--task", required=True)
+    bind.add_argument("--agent", required=True)
+    bind.add_argument("--dry-run", action="store_true")
+    bind.add_argument("--json", action="store_true")
+
+    agent = subparsers.add_parser("agent", help="Manage pinned project-scoped Codex agents")
+    agent_commands = agent.add_subparsers(dest="agent_command", required=True)
+    agent_commands.add_parser("list")
+    agent_show = agent_commands.add_parser("show")
+    agent_show.add_argument("name")
+    agent_validate = agent_commands.add_parser("validate")
+    agent_validate.add_argument("name", nargs="?")
+    agent_commands.add_parser("schema")
+    register = agent_commands.add_parser("register")
+    register.add_argument("file")
+    register.add_argument("--dry-run", action="store_true")
+    register.add_argument("--json", action="store_true")
+    for command_name in ("create", "update"):
+        command = agent_commands.add_parser(command_name)
+        command.add_argument("name")
+        authoring = command.add_mutually_exclusive_group(required=True)
+        authoring.add_argument("--generate")
+        authoring.add_argument("--spec")
+        command.add_argument("--model", required=command_name == "create")
+        command.add_argument("--reasoning-effort", required=command_name == "create")
+        command.add_argument("--sandbox", choices=sorted(SANDBOXES), required=command_name == "create")
+        command.add_argument("--generator-model")
+        command.add_argument("--generator-reasoning-effort")
+        command.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", "codex"))
+        command.add_argument("--dry-run", action="store_true")
+        command.add_argument("--json", action="store_true")
+    repin = agent_commands.add_parser("repin")
+    repin.add_argument("name")
+    repin.add_argument("--dry-run", action="store_true")
+    repin.add_argument("--json", action="store_true")
 
     plan = subparsers.add_parser("plan", help="Validate inputs and print the deterministic task order")
     plan.add_argument("workflow")
@@ -1269,7 +1893,150 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     project = _project_root(args.project_root)
     try:
+        if args.command == "agent":
+            root = _project_agents_root(project)
+            if args.agent_command == "schema":
+                print(json.dumps(AGENT_SPEC_SCHEMA, ensure_ascii=False, sort_keys=True, indent=2))
+                return 0
+            if args.agent_command == "list":
+                if not root.is_dir():
+                    return 0
+                for path in sorted(root.glob("*.toml")):
+                    _reject_symlink_alias(root, path, "agent")
+                    try:
+                        raw, payload = _read_toml_bytes(path, "agent")
+                        if set(raw) == AGENT_FIELDS:
+                            value = _validate_agent_value(raw, "agent", expected_name=path.stem)
+                            print(f"{value['name']}\t{_sha256_bytes(payload)}\tmanaged")
+                        else:
+                            print(f"{path.stem}\t-\tunmanaged")
+                    except ContractError as exc:
+                        print(f"{path.stem}\t-\tinvalid: {exc}")
+                return 0
+            if args.agent_command == "show":
+                path = _agent_path(project, args.name)
+                _load_agent_file(path, "agent", expected_name=args.name)
+                print(path.read_text(encoding="utf-8"), end="")
+                return 0
+            if args.agent_command == "validate":
+                names: list[str]
+                if args.name:
+                    names = [args.name]
+                else:
+                    names = []
+                    if root.is_dir():
+                        for path in sorted(root.glob("*.toml")):
+                            raw, _ = _read_toml_bytes(path, "agent")
+                            if set(raw) == AGENT_FIELDS:
+                                names.append(path.stem)
+                results = []
+                for name in names:
+                    value, payload = _load_agent_file(
+                        _agent_path(project, name), "agent", expected_name=name
+                    )
+                    results.append({
+                        "name": name,
+                        "sha256": _sha256_bytes(payload),
+                        "model": value["model"],
+                        "model_reasoning_effort": value["model_reasoning_effort"],
+                        "sandbox_mode": value["sandbox_mode"],
+                    })
+                print(json.dumps({"ok": True, "agents": results}, ensure_ascii=False, sort_keys=True, indent=2))
+                return 0
+            if args.agent_command == "register":
+                source = Path(args.file).expanduser().resolve()
+                value, payload = _load_agent_file(source, "agent source")
+                name = value["name"]
+                target = _agent_path(project, name)
+                if target.exists():
+                    raise ContractError("agent", f"already exists: {target}")
+                result = _agent_output(name, value, payload, [target], args.dry_run)
+                if not args.dry_run:
+                    _atomic_batch({target: payload})
+                _emit_mutation(result, args.json)
+                return 0
+            if args.agent_command in {"create", "update"}:
+                target = _agent_path(project, args.name)
+                exists = target.is_file()
+                if args.agent_command == "create" and exists:
+                    raise ContractError("agent", f"already exists: {target}")
+                if args.agent_command == "update" and not exists:
+                    raise ContractError("agent", f"does not exist: {target}")
+                original = target.read_bytes() if exists else None
+                old_value = (
+                    _validate_agent_value(
+                        tomllib.loads(original.decode("utf-8")), "agent", expected_name=args.name
+                    )
+                    if original is not None
+                    else None
+                )
+                spec = (
+                    _generate_agent_spec(args, project)
+                    if args.generate is not None
+                    else _read_agent_spec(args.spec, args.name)
+                )
+                if original is not None and target.read_bytes() != original:
+                    raise ContractError("agent", "changed concurrently during authoring; no files were written")
+                value = {
+                    **spec,
+                    "model": args.model or old_value["model"],
+                    "model_reasoning_effort": args.reasoning_effort or old_value["model_reasoning_effort"],
+                    "sandbox_mode": args.sandbox or old_value["sandbox_mode"],
+                }
+                payload = _agent_toml(value)
+                updates = {target: payload}
+                if args.agent_command == "update":
+                    updates.update(_repin_updates(project, args.name, value, payload))
+                result = _agent_output(args.name, value, payload, list(updates), args.dry_run)
+                if not args.dry_run:
+                    _atomic_batch(updates)
+                _emit_mutation(result, args.json)
+                return 0
+            if args.agent_command == "repin":
+                value, payload = _load_agent_file(
+                    _agent_path(project, args.name), "agent", expected_name=args.name
+                )
+                updates = _repin_updates(project, args.name, value, payload)
+                result = _agent_output(args.name, value, payload, list(updates), args.dry_run)
+                if not args.dry_run:
+                    _atomic_batch(updates)
+                _emit_mutation(result, args.json)
+                return 0
         if args.command == "workflow":
+            if args.workflow_command == "install":
+                updates, result = _install_workflow_updates(
+                    project,
+                    args.source,
+                    args.name,
+                    replace_agents=args.replace_agents,
+                )
+                result["dry_run"] = args.dry_run
+                if not args.dry_run:
+                    _atomic_batch(updates)
+                    load_workflow(
+                        _project_workflows_root(project) / args.name / "workflow.json",
+                        project,
+                    )
+                _emit_mutation(result, args.json)
+                return 0
+            if args.workflow_command == "bind-agent":
+                scope, path = resolve_workflow(args.workflow, project)
+                if scope != "project":
+                    raise ContractError("workflow", "bind-agent requires a project-scoped workflow")
+                updates, updated = _bind_agent_updates(project, path, args.task, args.agent)
+                result = {
+                    "ok": True,
+                    "dry_run": args.dry_run,
+                    "workflow_id": updated["workflow_id"],
+                    "task": args.task,
+                    "agent": args.agent,
+                    "paths": [str(item) for item in sorted(updates, key=lambda item: str(item))],
+                }
+                if not args.dry_run:
+                    _atomic_batch(updates)
+                    load_workflow(path, project)
+                _emit_mutation(result, args.json)
+                return 0
             if args.workflow_command == "init":
                 if not IDENTIFIER.fullmatch(args.name):
                     raise ContractError("name", "must be a lower-case hyphenated identifier")
@@ -1281,7 +2048,7 @@ def main(argv: list[str] | None = None) -> int:
                 schema = _template_schema()
                 _atomic_json(target / "schemas" / "draft.json", schema)
                 _atomic_json(target / "schemas" / "review.json", schema)
-                load_workflow(target / "workflow.json")
+                load_workflow(target / "workflow.json", project)
                 print(target)
                 return 0
             if args.workflow_command == "save":
@@ -1293,7 +2060,7 @@ def main(argv: list[str] | None = None) -> int:
                     if not args.force:
                         raise ContractError("workflow", f"already exists: {target}; use --force to replace")
                     shutil.rmtree(target)
-                _copy_workflow(source, target, workflow_id=args.name)
+                _copy_workflow(source, target, workflow_id=args.name, project=project)
                 print(target)
                 return 0
             if args.workflow_command == "list":
@@ -1310,7 +2077,11 @@ def main(argv: list[str] | None = None) -> int:
                             seen.add(key)
                 return 0
             scope, path = resolve_workflow(args.workflow, project)
-            loaded = load_workflow(path)
+            loaded = load_workflow(
+                path,
+                project,
+                validate_project_agents=scope != "builtin",
+            )
             if args.workflow_command == "show":
                 if args.schemas:
                     schemas = {
@@ -1336,7 +2107,7 @@ def main(argv: list[str] | None = None) -> int:
             if not 1 <= args.max_calls <= MAX_CALLS:
                 raise ContractError("max_calls", f"must be from 1 to {MAX_CALLS}")
             scope, path = resolve_workflow(args.workflow, project)
-            workflow = load_workflow(path)
+            workflow = load_workflow(path, project)
             inputs = _parse_input_values(args.inputs, args.input)
             validate_typed_values(inputs, workflow["inputs"], "inputs")
             planned_tasks, planned_calls = _execution_plan(workflow, inputs)

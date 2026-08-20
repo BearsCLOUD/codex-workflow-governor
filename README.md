@@ -49,12 +49,30 @@ Each task has a strict root-object JSON Schema. The runner invokes `codex exec -
 
 The graph, readiness, dependency blocking, fan-out item order, and artifact layout are deterministic for fixed workflow files and inputs. Model text and semantics are not deterministic.
 
-The built-in `adversarial-plugin-review` template runs independent read-only review lenses, challenges candidate findings against repository evidence, and produces a risk-ranked release verdict. Start with its supplied example inputs:
+### Pinned project agents
+
+`codex-exec-workflow.v2` binds tasks to managed project-scoped custom agents under `.codex/agents/`, following the [official Codex custom-agent contract](https://developers.openai.com/codex/subagents/). Each workflow records a byte-exact SHA-256 and its own TOML snapshot. Validation compares the project role, snapshot, digest, name, model, reasoning effort, and sandbox before planning or starting workers.
+
+Create a role from external strict JSON or generate it through a separate read-only `codex exec` call:
 
 ```bash
-python3 "$CLI" --project-root "$PROJECT" workflow validate builtin:adversarial-plugin-review
-python3 "$CLI" --project-root "$PROJECT" plan builtin:adversarial-plugin-review \
-  --inputs skills/codex-workflows/assets/workflows/adversarial-plugin-review/example-inputs.json
+python3 "$CLI" --project-root "$PROJECT" agent create reviewer \
+  --spec reviewer.json \
+  --model gpt-5.6-sol --reasoning-effort xhigh --sandbox read-only
+python3 "$CLI" --project-root "$PROJECT" workflow bind-agent project:release-review \
+  --task review --agent reviewer
+```
+
+Intentional updates repin every affected project workflow transactionally. Use `agent repin NAME` after direct TOML edits. All mutating role commands support `--dry-run` and `--json`; see [`project-agents.md`](skills/codex-workflows/references/project-agents.md) for both authoring modes, conflict behavior, drift recovery, and install commands.
+
+The v2 built-in `adversarial-plugin-review` template installs three pinned read-only roles, runs six independent review lenses through `adversarial-reviewer`, challenges candidate findings, and produces a risk-ranked release verdict. Install it into project scope before planning:
+
+```bash
+python3 "$CLI" --project-root "$PROJECT" workflow install \
+  builtin:adversarial-plugin-review --name adversarial-plugin-review
+python3 "$CLI" --project-root "$PROJECT" workflow validate project:adversarial-plugin-review
+python3 "$CLI" --project-root "$PROJECT" plan project:adversarial-plugin-review \
+  --inputs .codex/exec-workflows/adversarial-plugin-review/example-inputs.json
 ```
 
 See [`skills/codex-workflows/SKILL.md`](skills/codex-workflows/SKILL.md) for the calling-agent method and [`workflow-format.md`](skills/codex-workflows/references/workflow-format.md) for the contract.
@@ -88,6 +106,8 @@ python3 skills/score-documentation-quality/scripts/test_scoring.py
 ```
 
 Before distributing the skill separately, also run the `skill-creator` quick validator available in your Codex installation.
+
+The separate plugin-validator rejection for marketplace `policy.products` is not changed by the project-agent feature and remains an independent release blocker until the marketplace policy contract is resolved.
 
 ## License
 
