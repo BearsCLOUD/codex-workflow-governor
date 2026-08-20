@@ -1,0 +1,20 @@
+{
+  "name": "bears-workflow-governor",
+  "interface": {
+    "displayName": "Bears Workflow Governor"
+  },
+  "plugins": [
+    {
+      "name": "codex-workflow-governor",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Development"
+    }
+  ]
+}
