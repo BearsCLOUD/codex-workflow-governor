@@ -26,6 +26,8 @@ The plugin exposes `workflow-create`, `workflow-check`, `workflow-analyze`, `wor
 
 It also exposes `adaptive-deepening` and `graph-completion` as methodology skills for evidence-wave enrichment and knowledge-graph gap completion.
 
+A Governor workflow graph coordinates execution. A task-owned knowledge graph stores domain entities and facts; `graph-completion` never treats those two graph types as the same state.
+
 `score-documentation-quality` handles documentation edits, evidence-backed 100-point scoring, and lossless instruction migration. It selects the minimum sufficient mode and may trigger implicitly for relevant documentation work.
 
 Workflow lifecycle and methodology skills disable implicit invocation. Drafting and updating never modify the target repository; only `workflow-apply` materializes a draft.

@@ -1,7 +1,7 @@
 {
   "name": "codex-workflow-governor",
   "version": "0.2.0+codex.20260820184355",
-  "description": "Compile and govern Codex workflows and documentation instructions",
+  "description": "Compile and govern Codex workflows, evidence enrichment, and documentation instructions",
   "author": {
     "name": "BearsCLOUD",
     "url": "https://github.com/BearsCLOUD"
@@ -20,8 +20,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Workflow Governor",
-    "shortDescription": "Govern workflows and documentation instructions.",
-    "longDescription": "Create, validate, compile, visualize, and execute typed Codex workflows; evaluate and improve repository documentation instructions with adaptive depth and lossless migration support.",
+    "shortDescription": "Govern workflows, evidence methods, and documentation.",
+    "longDescription": "Create, validate, compile, visualize, and execute typed Codex workflows; deepen evidence and complete knowledge graphs; evaluate and improve documentation instructions with adaptive depth and lossless migration support.",
     "developerName": "BearsCLOUD",
     "category": "Development",
     "capabilities": [
@@ -32,6 +32,8 @@
       "Create an explicit workflow for this repository.",
       "Check the selected workflow and explain any drift.",
       "Run a guarded workflow by its workflow ID.",
+      "Deepen an incomplete evidence synthesis through targeted waves.",
+      "Complete decision-relevant knowledge graph gaps with provenance.",
       "Review and improve this repository's documentation instructions."
     ]
   },
