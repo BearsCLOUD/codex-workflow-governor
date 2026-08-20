@@ -153,8 +153,6 @@ python3 skills/score-documentation-quality/scripts/test_scoring.py
 
 Before distributing the skill separately, also run the `skill-creator` quick validator available in your Codex installation.
 
-The separate plugin-validator rejection for marketplace `policy.products` is not changed by the project-agent feature and remains an independent release blocker until the marketplace policy contract is resolved.
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
