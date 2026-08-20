@@ -1,0 +1,88 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "success",
+        "partial",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding_id": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "likely",
+              "uncertain",
+              "rejected",
+              "duplicate"
+            ]
+          },
+          "corrected_severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "none"
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "finding_id",
+          "verdict",
+          "corrected_severity",
+          "rationale",
+          "evidence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "cross_cutting_gaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reviewed_findings": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "status",
+    "summary",
+    "verdicts",
+    "cross_cutting_gaps",
+    "unresolved",
+    "reviewed_findings"
+  ],
+  "additionalProperties": false
+}
