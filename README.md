@@ -4,6 +4,15 @@ Codex Workflow Governor provides reusable asynchronous `codex exec` workflows wi
 
 The implementation uses only the Python standard library. It does not require the OpenAI Agents SDK, LangGraph, CrewAI, Temporal, or a web service.
 
+## Repository instruction chain
+
+This README is the public entrypoint, not an instruction authority. Read the repository instruction chain before changing source or documentation:
+
+1. [`AGENTS.md`](AGENTS.md) sets repository scope, precedence, and peer routes.
+2. [`MODEL.md`](MODEL.md) defines project model behavior and untrusted-data handling.
+3. [`DOCS.md`](DOCS.md) owns documentation placement, lifecycle, links, and Markdown rules.
+4. [`WORKFLOW.md`](WORKFLOW.md) owns stages, gates, write sets, validation, and delivery receipts.
+
 ## Requirements
 
 - Linux or macOS with Python 3.11 or newer;
