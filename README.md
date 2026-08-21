@@ -101,7 +101,7 @@ Create a role from external strict JSON or generate it through a separate read-o
 ```bash
 python3 "$CLI" --project-root "$PROJECT" agent create reviewer \
   --spec reviewer.json \
-  --model gpt-5.6-sol --reasoning-effort xhigh --sandbox read-only
+  --model gpt-5.6-sol --reasoning-effort medium --sandbox read-only
 python3 "$CLI" --project-root "$PROJECT" workflow bind-agent project:release-review \
   --task review --agent reviewer
 ```
@@ -131,6 +131,8 @@ python3 "$CLI" --project-root "$PROJECT" run project:workflow-audit \
 ```
 
 Set `target-workflow` to an explicit `project:`, `user:`, or `builtin:` reference and provide its real input object in `target-inputs`. The audit itself is read-only and never executes the target.
+
+Bundled model profiles are explicit: `adversarial-plugin-review` and `workflow-audit` use `gpt-5.6-sol` with `medium` reasoning; `fanout-synthesize`, `github-issue-worker`, `loop-monitor`, and new `workflow init` definitions use `gpt-5.6-luna` with `high` reasoning.
 
 See [`skills/codex-workflows/SKILL.md`](skills/codex-workflows/SKILL.md) for the calling-agent method, [`workflow-format.md`](skills/codex-workflows/references/workflow-format.md) for the base contract, and [`loop-workflows.md`](skills/codex-workflows/references/loop-workflows.md) for recurring lifecycle and recovery semantics.
 

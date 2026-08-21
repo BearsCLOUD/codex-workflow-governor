@@ -1095,6 +1095,7 @@ class WorkflowValidationTests(ExecRunnerTestCase):
         self.assertTrue(all(task["sandbox"] == "read-only" for task in plan["tasks"]))
         self.assertEqual(plan["tasks"][0]["agent"], "adversarial-reviewer")
         self.assertTrue(all(task["model"] == "gpt-5.6-sol" for task in plan["tasks"]))
+        self.assertTrue(all(task["reasoning_effort"] == "medium" for task in plan["tasks"]))
 
     def test_builtin_workflow_audit_installs_plans_and_runs_read_only(self) -> None:
         install_code, _, install_stderr = self.invoke(
@@ -1124,6 +1125,7 @@ class WorkflowValidationTests(ExecRunnerTestCase):
         self.assertEqual(plan["tasks"][1]["fanout_items"], 6)
         self.assertTrue(all(task["sandbox"] == "read-only" for task in plan["tasks"]))
         self.assertTrue(all(task["model"] == "gpt-5.6-sol" for task in plan["tasks"]))
+        self.assertTrue(all(task["reasoning_effort"] == "medium" for task in plan["tasks"]))
         self.assertEqual(plan["tasks"][0]["agent"], "workflow-auditor")
         self.assertEqual(plan["tasks"][-1]["agent"], "workflow-audit-judge")
 
@@ -1139,6 +1141,35 @@ class WorkflowValidationTests(ExecRunnerTestCase):
         self.assertEqual(result_code, 0, result_stderr)
         verdict = json.loads(result_stdout)["audit-verdict"]
         self.assertEqual(verdict["audit_recommendation"], "approve")
+
+    def test_non_review_templates_pin_luna_high(self) -> None:
+        builtin_root = (
+            Path(__file__).resolve().parents[1]
+            / "skills/codex-workflows/assets/workflows"
+        )
+        for name in ("fanout-synthesize", "github-issue-worker", "loop-monitor"):
+            with self.subTest(name=name):
+                workflow = load_workflow(builtin_root / name / "workflow.json")
+                self.assertTrue(
+                    all(task["model"] == "gpt-5.6-luna" for task in workflow["tasks"].values())
+                )
+                self.assertTrue(
+                    all(task["reasoning_effort"] == "high" for task in workflow["tasks"].values())
+                )
+
+        init_code, _, init_stderr = self.invoke(
+            "workflow", "init", "starter-profile", "--scope", "project"
+        )
+        self.assertEqual(init_code, 0, init_stderr)
+        starter = load_workflow(
+            self.project / ".codex/exec-workflows/starter-profile/workflow.json"
+        )
+        self.assertTrue(
+            all(task["model"] == "gpt-5.6-luna" for task in starter["tasks"].values())
+        )
+        self.assertTrue(
+            all(task["reasoning_effort"] == "high" for task in starter["tasks"].values())
+        )
 
     def test_non_standard_json_input_is_rejected_before_run_persistence(self) -> None:
         workflow = self.write_workflow(

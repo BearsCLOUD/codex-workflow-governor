@@ -112,6 +112,8 @@ python3 "$CLI" --project-root "$PROJECT" run project:workflow-audit \
   --inputs .codex/exec-workflows/workflow-audit/example-inputs.json --detach
 ```
 
+Bundled model profiles are fixed by workflow class: review workflows use `gpt-5.6-sol` with `medium` reasoning; all other bundled workflows and the `workflow init` starter use `gpt-5.6-luna` with `high` reasoning.
+
 ## Safety and correctness
 
 - Keep `sandbox: read-only` unless writes are required. The runner serializes write-capable finite tasks project-wide. A persistent write task additionally requires `write_isolation: git-worktree`, and the supervisor creates a detached worktree for that cycle; the existing `--allow-workspace-write` or `--allow-danger-full-access` run opt-in is still mandatory.

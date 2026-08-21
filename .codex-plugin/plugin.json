@@ -1,6 +1,6 @@
 {
   "name": "codex-workflow-governor",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Run reusable asynchronous, adaptive, or persistent codex exec graphs",
   "author": {
     "name": "BearsCLOUD",

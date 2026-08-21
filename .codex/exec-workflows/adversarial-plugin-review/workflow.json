@@ -2,26 +2,26 @@
   "agents": {
     "adversarial-reviewer": {
       "model": "gpt-5.6-sol",
-      "model_reasoning_effort": "xhigh",
+      "model_reasoning_effort": "medium",
       "project_path": ".codex/agents/adversarial-reviewer.toml",
       "sandbox_mode": "read-only",
-      "sha256": "caee852f0723650a66f41812c9833afaa734bf747cfdea8e9a0d30605169cb00",
+      "sha256": "ad498700c37f63e981c9d70e2e8dbeba9e03d8fe323e1a52c63f8c64bed535bb",
       "snapshot_path": "agents/adversarial-reviewer.toml"
     },
     "finding-challenger": {
       "model": "gpt-5.6-sol",
-      "model_reasoning_effort": "xhigh",
+      "model_reasoning_effort": "medium",
       "project_path": ".codex/agents/finding-challenger.toml",
       "sandbox_mode": "read-only",
-      "sha256": "f038bd6322fde75384ea7a5452f51dbd92b78e99790c2bb33cc82bbdb6bb19f1",
+      "sha256": "71e5037d9018324003454699f7711c6f54492e2c7d3487aa8959d8f5e3cd9a21",
       "snapshot_path": "agents/finding-challenger.toml"
     },
     "release-judge": {
       "model": "gpt-5.6-sol",
-      "model_reasoning_effort": "xhigh",
+      "model_reasoning_effort": "medium",
       "project_path": ".codex/agents/release-judge.toml",
       "sandbox_mode": "read-only",
-      "sha256": "fb2f94da23dd68955cbf90652bb463c7853f1f9e240a69b72e6ff1e0d12aa375",
+      "sha256": "8fc79118b7fffd2699270ffd8b33287053f0369731589b35f7921fce01a54e3b",
       "snapshot_path": "agents/release-judge.toml"
     }
   },

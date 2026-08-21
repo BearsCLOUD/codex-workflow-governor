@@ -76,7 +76,7 @@ Version 2 adds one required root field, `agents`, and lets tasks select a pinned
       "snapshot_path": "agents/adversarial-reviewer.toml",
       "sha256": "<byte-exact sha256>",
       "model": "gpt-5.6-sol",
-      "model_reasoning_effort": "xhigh",
+      "model_reasoning_effort": "medium",
       "sandbox_mode": "read-only"
     }
   },

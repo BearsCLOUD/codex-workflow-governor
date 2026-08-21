@@ -9,7 +9,7 @@ Use `--spec` when another agent or person already prepared a strict JSON object 
 ```bash
 python3 "$CLI" --project-root "$PROJECT" agent create reviewer \
   --spec reviewer.json \
-  --model gpt-5.6-sol --reasoning-effort xhigh --sandbox read-only
+  --model gpt-5.6-sol --reasoning-effort medium --sandbox read-only
 ```
 
 Use `--generate` to have the installed `codex exec` author the same strict JSON shape. Generator settings are separate from the role's pinned target settings, and generation always runs read-only:
@@ -18,7 +18,7 @@ Use `--generate` to have the installed `codex exec` author the same strict JSON 
 python3 "$CLI" --project-root "$PROJECT" agent create reviewer \
   --generate "Review release blockers with exact repository evidence." \
   --generator-model gpt-5.6-luna --generator-reasoning-effort medium \
-  --model gpt-5.6-sol --reasoning-effort xhigh --sandbox read-only
+  --model gpt-5.6-sol --reasoning-effort medium --sandbox read-only
 ```
 
 For `create`, all three target settings are required and an existing role is never overwritten. For `update`, omitted target settings retain their current values. `update` rechecks the original role bytes after generation and fails without writing if the role changed concurrently. Every mutating agent command supports `--dry-run` and `--json`.

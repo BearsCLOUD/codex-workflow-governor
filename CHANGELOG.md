@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0 — 2026-08-21
+
+### Changed
+
+- Standardized both bundled review workflows on `gpt-5.6-sol` with `medium` reasoning.
+- Pinned every task in the other bundled workflows and the `workflow init` starter to `gpt-5.6-luna` with `high` reasoning instead of inheriting host defaults.
+
 ## 0.9.0 — 2026-08-21
 
 ### Added

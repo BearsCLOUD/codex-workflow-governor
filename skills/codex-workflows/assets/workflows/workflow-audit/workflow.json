@@ -7,25 +7,25 @@
     "workflow-auditor": {
       "project_path": ".codex/agents/workflow-auditor.toml",
       "snapshot_path": "agents/workflow-auditor.toml",
-      "sha256": "776aa7e9d5f9c2c304e1bc6bbec828f18aced990816384e61f86e2298b0fca3c",
+      "sha256": "1edd1238db5d300beb8af02d13df79c03d855a518439f9e37d53e3a28c81e70f",
       "model": "gpt-5.6-sol",
-      "model_reasoning_effort": "xhigh",
+      "model_reasoning_effort": "medium",
       "sandbox_mode": "read-only"
     },
     "workflow-finding-challenger": {
       "project_path": ".codex/agents/workflow-finding-challenger.toml",
       "snapshot_path": "agents/workflow-finding-challenger.toml",
-      "sha256": "03dbf289e61d8622feb7c0ee68265960ec27cf08ce8020391d6b4d6f6133751f",
+      "sha256": "dd5c00745daf50d9fda6b903b6474c2a607a37585a38b7f6d1d0e23858a09e53",
       "model": "gpt-5.6-sol",
-      "model_reasoning_effort": "xhigh",
+      "model_reasoning_effort": "medium",
       "sandbox_mode": "read-only"
     },
     "workflow-audit-judge": {
       "project_path": ".codex/agents/workflow-audit-judge.toml",
       "snapshot_path": "agents/workflow-audit-judge.toml",
-      "sha256": "59b3e31501e670a3257632dd034be3ca604277519fa09c4e507ed8a275d7d1af",
+      "sha256": "eefb285088d31ea50a3fb5e0cf591a52fd14e8ac2b8cfb9561176c10a35c7d0d",
       "model": "gpt-5.6-sol",
-      "model_reasoning_effort": "xhigh",
+      "model_reasoning_effort": "medium",
       "sandbox_mode": "read-only"
     }
   },
