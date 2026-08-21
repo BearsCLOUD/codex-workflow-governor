@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["selected", "no-issue", "blocked"]},
+    "found": {"type": "boolean"},
+    "issue_number": {"type": "integer"},
+    "issue_title": {"type": "string"},
+    "issue_body": {"type": "string"},
+    "issue_url": {"type": "string"},
+    "issue_updated_at": {"type": "string"},
+    "base_sha": {"type": "string"},
+    "remote_sha": {"type": "string"},
+    "selected_cursor": {"type": "string"},
+    "evidence": {"type": "array", "items": {"type": "string"}},
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "found", "issue_number", "issue_title", "issue_body", "issue_url", "issue_updated_at", "base_sha", "remote_sha", "selected_cursor", "evidence", "blockers"],
+  "additionalProperties": false
+}

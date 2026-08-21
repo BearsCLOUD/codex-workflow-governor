@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["implemented", "no-issue", "blocked"]},
+    "summary": {"type": "string"},
+    "base_sha": {"type": "string"},
+    "files_changed": {"type": "array", "items": {"type": "string"}},
+    "validations": {"type": "array", "items": {"type": "string"}},
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "summary", "base_sha", "files_changed", "validations", "blockers"],
+  "additionalProperties": false
+}

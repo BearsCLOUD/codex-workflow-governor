@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["delivered", "no-issue", "blocked"]},
+    "summary": {"type": "string"},
+    "issue_number": {"type": "integer"},
+    "commit_sha": {"type": "string"},
+    "remote_sha": {"type": "string"},
+    "plugin_version": {"type": "string"},
+    "issue_state": {"type": "string"},
+    "committed_cursor": {"type": "string"},
+    "evidence": {"type": "array", "items": {"type": "string"}},
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "summary", "issue_number", "commit_sha", "remote_sha", "plugin_version", "issue_state", "committed_cursor", "evidence", "blockers"],
+  "additionalProperties": false
+}
