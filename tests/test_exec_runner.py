@@ -1454,6 +1454,22 @@ class LoopWorkflowTests(ExecRunnerTestCase):
         with self.assertRaisesRegex(ContractError, "require an idempotency key"):
             load_workflow(workflow / "workflow.json", self.project)
 
+    def test_github_delivery_discovery_can_use_detached_networked_worktree(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        workflow = load_workflow(
+            repository
+            / ".codex/exec-workflows/github-issue-delivery/workflow.json",
+            repository,
+        )
+
+        discover = workflow["tasks"]["discover"]
+        self.assertEqual(workflow["loop"]["interval_seconds"], 5)
+        self.assertEqual(workflow["loop"]["jitter_seconds"], 0)
+        self.assertEqual(discover["sandbox"], "danger-full-access")
+        self.assertEqual(discover["write_isolation"], "git-worktree")
+        self.assertIn("detached isolated worktree", discover["prompt"])
+        self.assertIn("do not require a local branch checkout", discover["prompt"])
+
     def test_bundled_monitors_validate_install_and_deny_mutations(self) -> None:
         for name in ("loop-monitor", "github-issue-worker"):
             with self.subTest(name=name):
