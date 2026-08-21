@@ -82,6 +82,36 @@ description: Адаптивно оценивать и улучшать Markdown-
 
 Для формальной оценки начать с `Итог: X/100` либо `Итог: X–Y/100`, затем указать уровень и уверенность. Показать область, восемь измерений, системные ограничения, сильные стороны, приоритетные улучшения и ограничения проверки. Полный evidence дать в ответе либо во временном JSON по запросу.
 
+## Настроить final topology
+
+`--final-topology-gate` проверяет policy из JSON, а не правило, зашитое в checker. Формат описан в [references/final-topology.schema.json](references/final-topology.schema.json). Policy может объявить `root_nodes.allowed` и `root_nodes.required`, `required_edges`, `parent_rules` (`none`, `exactly_one` или `any`), `allow_additional_peer_routes` и `forbidden_edges`. Для ребра используются поля `parent`/`child` (также принимаются `from`/`to`). Например, строгая peer-топология:
+
+```json
+{
+  "schema_version": "1.0",
+  "name": "direct peers",
+  "root_nodes": {
+    "allowed": ["AGENTS.md", "DOCS.md", "MODEL.md", "WORKFLOW.md"],
+    "required": ["AGENTS.md", "DOCS.md", "MODEL.md", "WORKFLOW.md"]
+  },
+  "required_edges": [
+    {"parent": "AGENTS.md", "child": "DOCS.md"},
+    {"parent": "AGENTS.md", "child": "MODEL.md"},
+    {"parent": "AGENTS.md", "child": "WORKFLOW.md"}
+  ],
+  "parent_rules": {
+    "AGENTS.md": "none",
+    "DOCS.md": "exactly_one",
+    "MODEL.md": "exactly_one",
+    "WORKFLOW.md": "exactly_one"
+  },
+  "allow_additional_peer_routes": false,
+  "forbidden_edges": []
+}
+```
+
+Precedence is explicit `--topology-config PATH`, then the first repository file found at `.codex/final-topology.json`, `.codex/instruction-topology.json`, or `final-topology.json`, then the backward-compatible default `AGENTS.md -> DOCS.md -> MODEL.md/WORKFLOW.md`. With no configuration, the required roots and historical routing checks remain enforced, while unrelated additional authority roots remain tolerated for compatibility. When a policy declares `root_nodes.allowed`, that list is an explicit allow-list and unexpected authority roots fail the gate. `allow_additional_peer_routes` разрешает только дополнительные `routes_to` между узлами из этого allow-list; маршрут strict root к неразрешённому non-peer target (например, `contracts/*.md`) остаётся ошибкой. The policy is used only by `--final-topology-gate`; `--migration-gate` is unchanged. A strict policy rejects undeclared routes and reports the configured rule together with the actual conflicting edge.
+
 ## Использовать ресурсы навыка
 
 - [references/methodology.md](references/methodology.md) — формальная 100-балльная методология и deep migration details.
@@ -90,6 +120,7 @@ description: Адаптивно оценивать и улучшать Markdown-
 - [references/review.schema.json](references/review.schema.json) — схема формальной оценки.
 - [references/semantic-graph-methodology.md](references/semantic-graph-methodology.md) — глубокая семантическая проверка.
 - [references/instruction-graph.schema.json](references/instruction-graph.schema.json) — схема графа.
+- [references/final-topology.schema.json](references/final-topology.schema.json) — схема final-topology policy.
 - `scripts/scan_documentation.py` — статический сбор признаков.
 - `scripts/calculate_score.py` — расчёт диапазона 0–100.
 - `scripts/check_instruction_graph.py` — глубокая graph/topology-проверка.

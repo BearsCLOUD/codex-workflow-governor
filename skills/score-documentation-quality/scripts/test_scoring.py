@@ -1311,10 +1311,17 @@ class ScoringScriptsTest(unittest.TestCase):
                 "edges": edges,
             }
             graph_path = root / "graph.json"
-            def run(value: dict, gate: str = "--final-topology-gate") -> subprocess.CompletedProcess[str]:
+            def run(
+                value: dict,
+                gate: str = "--final-topology-gate",
+                topology_config: Path | None = None,
+            ) -> subprocess.CompletedProcess[str]:
                 graph_path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+                command = [sys.executable, str(GRAPH), str(graph_path), "--root", str(root), gate]
+                if topology_config is not None:
+                    command.extend(["--topology-config", str(topology_config)])
                 return subprocess.run(
-                    [sys.executable, str(GRAPH), str(graph_path), "--root", str(root), gate],
+                    command,
                     text=True,
                     capture_output=True,
                     check=False,
@@ -1322,6 +1329,161 @@ class ScoringScriptsTest(unittest.TestCase):
 
             completed = run(graph)
             self.assertEqual(completed.returncode, 0, completed.stderr)
+
+            # The implicit default must retain the historical tolerance for
+            # unrelated authority roots.  The required topology still has to
+            # pass when an additional root artifact is present.
+            extra_root_graph = json.loads(json.dumps(graph))
+            extra_root_path = root / "EXTRA.md"
+            extra_root_path.write_text("# EXTRA.md\n", encoding="utf-8")
+            extra_root_graph["scope"]["units"].append(
+                {
+                    "path": "EXTRA.md",
+                    "content_sha256": hashlib.sha256(extra_root_path.read_bytes()).hexdigest(),
+                }
+            )
+            extra_root_graph["nodes"].append(
+                {
+                    "id": "artifact.extra",
+                    "type": "artifact",
+                    "artifact_kind": "root_instruction",
+                    "label": "EXTRA.md",
+                    "authority": True,
+                    "source": {"path": "EXTRA.md", "locator": "L1", "note": "Additional root."},
+                }
+            )
+            normalized_extra_units = json.dumps(
+                sorted(extra_root_graph["scope"]["units"], key=lambda item: item["path"]),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            extra_root_graph["scope"]["digest"] = hashlib.sha256(
+                normalized_extra_units.encode("utf-8")
+            ).hexdigest()
+            self.assertEqual(run(extra_root_graph).returncode, 0)
+
+            strict_config = root / "strict-topology.json"
+            strict_config.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "root_nodes": {"allowed": root_files, "required": root_files},
+                        "required_edges": [
+                            {"parent": "AGENTS.md", "child": "DOCS.md"},
+                            {"parent": "DOCS.md", "child": "MODEL.md"},
+                            {"parent": "DOCS.md", "child": "WORKFLOW.md"},
+                        ],
+                        "parent_rules": {
+                            "AGENTS.md": "none",
+                            "DOCS.md": "exactly_one",
+                            "MODEL.md": "exactly_one",
+                            "WORKFLOW.md": "exactly_one",
+                        },
+                        "allow_additional_peer_routes": False,
+                        "forbidden_edges": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            strict_result = run(graph, topology_config=strict_config)
+            self.assertEqual(strict_result.returncode, 0, strict_result.stderr)
+
+            # Routes from a non-top-level authority root to a contract remain
+            # valid, matching the historical gate's contract-parent rule.
+            strict_docs_contract_graph = json.loads(json.dumps(graph))
+            strict_docs_contract_graph["edges"] = [
+                edge
+                for edge in strict_docs_contract_graph["edges"]
+                if edge["id"] != "edge.model.artifacts"
+            ]
+            docs_contract_edge = json.loads(json.dumps(graph["edges"][-1]))
+            docs_contract_edge.update(
+                {
+                    "id": "edge.docs.artifacts",
+                    "from": "artifact.docs",
+                    "to": "artifact.contract.artifacts",
+                }
+            )
+            strict_docs_contract_graph["edges"].append(docs_contract_edge)
+            self.assertEqual(run(strict_docs_contract_graph, topology_config=strict_config).returncode, 0)
+
+            # A strict policy must reject an undeclared non-peer route even
+            # when the policy has an arbitrary human-readable name.
+            strict_extra_route_graph = json.loads(json.dumps(graph))
+            strict_extra_route = json.loads(json.dumps(strict_extra_route_graph["edges"][0]))
+            strict_extra_route.update(
+                {
+                    "id": "edge.agents.contract.extra",
+                    "from": "artifact.agents",
+                    "to": "artifact.contract.artifacts",
+                }
+            )
+            strict_extra_route_graph["edges"].append(strict_extra_route)
+            strict_extra_result = run(strict_extra_route_graph, topology_config=strict_config)
+            self.assertEqual(strict_extra_result.returncode, 4)
+            self.assertIn("topology rule additional routes disallowed for AGENTS.md", strict_extra_result.stdout)
+            self.assertIn("AGENTS.md -> contracts/artifacts.md", strict_extra_result.stdout)
+
+            peer_graph = json.loads(json.dumps(graph))
+            peer_graph["edges"] = [
+                edge
+                for edge in peer_graph["edges"]
+                if edge["id"] not in {"edge.docs.model", "edge.docs.workflow"}
+            ]
+            for edge_id, target_id in (
+                ("edge.agents.model", "artifact.model"),
+                ("edge.agents.workflow", "artifact.workflow"),
+            ):
+                peer_edge = json.loads(json.dumps(peer_graph["edges"][0]))
+                peer_edge.update({"id": edge_id, "to": target_id})
+                peer_graph["edges"].append(peer_edge)
+            peer_config = root / "peer-topology.json"
+            peer_config.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "name": "direct peers",
+                        "root_nodes": {"allowed": root_files, "required": root_files},
+                        "required_edges": [
+                            {"parent": "AGENTS.md", "child": "DOCS.md"},
+                            {"parent": "AGENTS.md", "child": "MODEL.md"},
+                            {"parent": "AGENTS.md", "child": "WORKFLOW.md"},
+                        ],
+                        "parent_rules": {
+                            "AGENTS.md": "none",
+                            "DOCS.md": "exactly_one",
+                            "MODEL.md": "exactly_one",
+                            "WORKFLOW.md": "exactly_one",
+                        },
+                        "allow_additional_peer_routes": False,
+                        "forbidden_edges": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            peer_result = run(peer_graph, topology_config=peer_config)
+            self.assertEqual(peer_result.returncode, 0, peer_result.stderr)
+            self.assertEqual(run(peer_graph, "--migration-gate").returncode, 0)
+
+            mixed_graph = json.loads(json.dumps(peer_graph))
+            mixed_edge = json.loads(json.dumps(mixed_graph["edges"][0]))
+            mixed_edge.update({"id": "edge.docs.model.mixed", "from": "artifact.docs", "to": "artifact.model"})
+            mixed_graph["edges"].append(mixed_edge)
+            mixed_result = run(mixed_graph, topology_config=peer_config)
+            self.assertEqual(mixed_result.returncode, 4)
+            self.assertIn("topology rule parent count MODEL.md=exactly_one", mixed_result.stdout)
+            self.assertIn("AGENTS.md", mixed_result.stdout)
+            self.assertIn("DOCS.md", mixed_result.stdout)
+
+            forbidden_config = root / "forbidden-topology.json"
+            forbidden_policy = json.loads(peer_config.read_text(encoding="utf-8"))
+            forbidden_policy["allow_additional_peer_routes"] = True
+            forbidden_policy["forbidden_edges"] = [{"parent": "DOCS.md", "child": "MODEL.md"}]
+            forbidden_config.write_text(json.dumps(forbidden_policy), encoding="utf-8")
+            forbidden_result = run(mixed_graph, topology_config=forbidden_config)
+            self.assertEqual(forbidden_result.returncode, 4)
+            self.assertIn("topology rule forbidden edge DOCS.md -> MODEL.md", forbidden_result.stdout)
 
             missing_parent_graph = json.loads(json.dumps(graph))
             missing_parent_graph["edges"] = [
@@ -1382,6 +1544,33 @@ class ScoringScriptsTest(unittest.TestCase):
             agents_contract["edges"].append(extra_contract_route)
             self.assertEqual(run(agents_contract).returncode, 4)
 
+            agents_contract_only = json.loads(json.dumps(graph))
+            agents_contract_only["edges"] = [
+                edge
+                for edge in agents_contract_only["edges"]
+                if edge["id"] != "edge.model.artifacts"
+            ]
+            agents_contract_only["edges"].append(extra_contract_route)
+            self.assertEqual(run(agents_contract_only).returncode, 4)
+
+            # allow_additional_peer_routes must not permit a root to route to
+            # an undeclared non-peer target.
+            allow_nonpeer_config = json.loads(strict_config.read_text(encoding="utf-8"))
+            allow_nonpeer_config["allow_additional_peer_routes"] = True
+            allow_nonpeer_config_path = root / "strict-allow-additional.json"
+            allow_nonpeer_config_path.write_text(
+                json.dumps(allow_nonpeer_config), encoding="utf-8"
+            )
+            allow_nonpeer_result = run(
+                agents_contract_only, topology_config=allow_nonpeer_config_path
+            )
+            self.assertEqual(allow_nonpeer_result.returncode, 4)
+            self.assertIn(
+                "allow_additional_peer_routes only permits allowed peer roots",
+                allow_nonpeer_result.stdout,
+            )
+            self.assertIn("AGENTS.md -> contracts/artifacts.md", allow_nonpeer_result.stdout)
+
             self_route = json.loads(json.dumps(graph))
             loop = json.loads(json.dumps(self_route["edges"][-1]))
             loop.update(
@@ -1419,6 +1608,27 @@ class ScoringScriptsTest(unittest.TestCase):
             duplicate["id"] = "artifact.contract.artifacts.duplicate"
             duplicate_artifact["nodes"].append(duplicate)
             self.assertEqual(run(duplicate_artifact).returncode, 4)
+
+            with tempfile.TemporaryDirectory() as no_policy_directory:
+                no_policy_dir = Path(no_policy_directory)
+                try:
+                    (root / ".codex").symlink_to(no_policy_dir, target_is_directory=True)
+                except OSError:
+                    self.skipTest("Символические ссылки недоступны в окружении")
+                no_policy_result = run(graph)
+                self.assertEqual(no_policy_result.returncode, 0, no_policy_result.stderr)
+                (root / ".codex").unlink()
+
+            with tempfile.TemporaryDirectory() as outside_directory:
+                outside_dir = Path(outside_directory)
+                (outside_dir / "final-topology.json").write_text("{}", encoding="utf-8")
+                try:
+                    (root / ".codex").symlink_to(outside_dir, target_is_directory=True)
+                except OSError:
+                    self.skipTest("Символические ссылки недоступны в окружении")
+                symlinked_policy = run(graph)
+                self.assertEqual(symlinked_policy.returncode, 2)
+                self.assertIn("passes through a symlink", symlinked_policy.stderr)
 
     def test_graph_enforces_relation_types_hashes_and_confirmed_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

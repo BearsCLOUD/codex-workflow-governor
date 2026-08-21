@@ -65,8 +65,36 @@ CANONICAL_ROOT_FILES = {
     "model.md": "MODEL.md",
     "workflow.md": "WORKFLOW.md",
 }
+TOPOLOGY_CONFIG_CANDIDATES = (
+    ".codex/final-topology.json",
+    ".codex/instruction-topology.json",
+    "final-topology.json",
+)
 RESOLVABLE_FINDINGS = {"normalized-rule-conflict", "normalized-modality-drift"}
 RESOLUTION_DECISIONS = {"rejected", "resolved"}
+
+
+def default_topology_config() -> dict[str, Any]:
+    """Return the historical AGENTS -> DOCS -> MODEL/WORKFLOW policy."""
+    root_paths = list(CANONICAL_ROOT_FILES.values())
+    return {
+        "name": "default AGENTS.md -> DOCS.md -> MODEL.md/WORKFLOW.md",
+        "allowed_root_nodes": root_paths,
+        "required_root_nodes": root_paths,
+        "required_edges": [
+            {"parent": "AGENTS.md", "child": "DOCS.md"},
+            {"parent": "DOCS.md", "child": "MODEL.md"},
+            {"parent": "DOCS.md", "child": "WORKFLOW.md"},
+        ],
+        "parent_rules": {
+            "AGENTS.md": "none",
+            "DOCS.md": "exactly_one",
+            "MODEL.md": "exactly_one",
+            "WORKFLOW.md": "exactly_one",
+        },
+        "allow_additional_peer_routes": False,
+        "forbidden_edges": [],
+    }
 
 
 class GraphError(ValueError):
@@ -1215,29 +1243,268 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def final_topology_issues(graph: dict[str, Any]) -> list[str]:
-    required_paths = set(CANONICAL_ROOT_FILES.values())
-    unit_paths = {unit["path"] for unit in graph["scope"]["units"]}
+def _topology_paths(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise GraphError(f"{label} должен быть непустым массивом путей.")
+    paths: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not safe_relative_path(item):
+            raise GraphError(f"{label}[{index}] должен быть безопасным относительным путём.")
+        if item in paths:
+            raise GraphError(f"{label} содержит дубликат {item}.")
+        paths.append(item)
+    return paths
+
+
+def _topology_edge(value: Any, label: str) -> tuple[str, str]:
+    if not isinstance(value, dict):
+        raise GraphError(f"{label} должен быть объектом.")
+    keys = set(value)
+    if keys == {"parent", "child"}:
+        source, target = value["parent"], value["child"]
+    elif keys == {"from", "to"}:
+        source, target = value["from"], value["to"]
+    else:
+        raise GraphError(f"{label} должен содержать ровно parent/child или from/to.")
+    if not isinstance(source, str) or not safe_relative_path(source):
+        raise GraphError(f"{label}.parent/from должен быть безопасным относительным путём.")
+    if not isinstance(target, str) or not safe_relative_path(target):
+        raise GraphError(f"{label}.child/to должен быть безопасным относительным путём.")
+    return source, target
+
+
+def normalize_topology_config(raw: Any | None, source: str = "topology configuration") -> dict[str, Any]:
+    """Validate and normalize a repository final-topology policy."""
+    implicit_default = raw is None
+    if implicit_default:
+        raw = default_topology_config()
+    if not isinstance(raw, dict):
+        raise GraphError(f"{source} должен быть JSON-объектом.")
+    allowed_keys = {
+        "schema_version", "name", "root_nodes", "allowed_root_nodes", "required_root_nodes",
+        "required_edges", "parent_rules", "single_parent", "exactly_one_parent", "no_parent",
+        "allow_additional_peer_routes", "forbidden_edges",
+    }
+    unknown = set(raw) - allowed_keys
+    if unknown:
+        raise GraphError(f"{source}: неизвестные поля {', '.join(sorted(unknown))}.")
+    if raw.get("schema_version", "1.0") != "1.0":
+        raise GraphError(f"{source}.schema_version должен быть 1.0.")
+
+    root_nodes = raw.get("root_nodes")
+    allowed_value = raw.get("allowed_root_nodes")
+    required_value = raw.get("required_root_nodes")
+    roots_declared = root_nodes is not None or allowed_value is not None or required_value is not None
+    if root_nodes is not None:
+        if isinstance(root_nodes, list):
+            if allowed_value is not None or required_value is not None:
+                raise GraphError(f"{source}: root_nodes нельзя смешивать с top-level root lists.")
+            allowed_value = required_value = root_nodes
+        elif isinstance(root_nodes, dict):
+            if set(root_nodes) - {"allowed", "required"}:
+                raise GraphError(f"{source}.root_nodes содержит неизвестные поля.")
+            if allowed_value is not None or required_value is not None:
+                raise GraphError(f"{source}: root_nodes нельзя смешивать с top-level root lists.")
+            allowed_value = root_nodes.get("allowed")
+            required_value = root_nodes.get("required")
+        else:
+            raise GraphError(f"{source}.root_nodes должен быть массивом или объектом.")
+    if allowed_value is None and required_value is None:
+        defaults = default_topology_config()
+        allowed_value = defaults["allowed_root_nodes"]
+        required_value = defaults["required_root_nodes"]
+    elif allowed_value is None:
+        allowed_value = required_value
+    elif required_value is None:
+        required_value = allowed_value
+    allowed_roots = _topology_paths(allowed_value, f"{source}.allowed_root_nodes")
+    required_roots = _topology_paths(required_value, f"{source}.required_root_nodes")
+    if not set(required_roots) <= set(allowed_roots):
+        missing = sorted(set(required_roots) - set(allowed_roots))
+        raise GraphError(f"{source}: required_root_nodes не разрешены: {', '.join(missing)}.")
+
+    required_edges: list[tuple[str, str]] = []
+    raw_required_edges = raw.get("required_edges", [])
+    if not isinstance(raw_required_edges, list):
+        raise GraphError(f"{source}.required_edges должен быть массивом.")
+    for index, item in enumerate(raw_required_edges):
+        edge = _topology_edge(item, f"{source}.required_edges[{index}]")
+        if edge in required_edges:
+            raise GraphError(f"{source}.required_edges содержит дубликат {edge[0]} -> {edge[1]}.")
+        required_edges.append(edge)
+    unknown_edge_nodes = {
+        path
+        for edge in required_edges
+        for path in edge
+        if path not in allowed_roots
+    }
+    if unknown_edge_nodes:
+        raise GraphError(
+            f"{source}.required_edges содержит неразрешённые root nodes: "
+            + ", ".join(sorted(unknown_edge_nodes))
+            + "."
+        )
+
+    parent_rules: dict[str, str] = {}
+    raw_parent_rules = raw.get("parent_rules", {})
+    if not isinstance(raw_parent_rules, dict):
+        raise GraphError(f"{source}.parent_rules должен быть объектом.")
+    for path, rule in raw_parent_rules.items():
+        if not isinstance(path, str) or not safe_relative_path(path):
+            raise GraphError(f"{source}.parent_rules содержит небезопасный путь.")
+        if rule not in {"none", "exactly_one", "any"}:
+            raise GraphError(f"{source}.parent_rules[{path}] должен быть none, exactly_one или any.")
+        parent_rules[path] = rule
+    for field, rule in (("single_parent", "exactly_one"), ("exactly_one_parent", "exactly_one"), ("no_parent", "none")):
+        if field not in raw:
+            continue
+        for path in _topology_paths(raw[field], f"{source}.{field}"):
+            previous = parent_rules.get(path)
+            if previous is not None and previous != rule:
+                raise GraphError(f"{source}: противоречивые parent rules для {path}.")
+            parent_rules[path] = rule
+    unknown_parent_paths = set(parent_rules) - set(allowed_roots)
+    if unknown_parent_paths:
+        raise GraphError(
+            f"{source}.parent_rules содержит неразрешённые root nodes: "
+            + ", ".join(sorted(unknown_parent_paths))
+            + "."
+        )
+
+    additional = raw.get("allow_additional_peer_routes", False)
+    if not isinstance(additional, (bool, dict)):
+        raise GraphError(f"{source}.allow_additional_peer_routes должен быть boolean или объектом.")
+    if isinstance(additional, dict):
+        additional_by_source: bool | dict[str, bool] = {}
+        for path, value in additional.items():
+            if not isinstance(path, str) or not safe_relative_path(path) or not isinstance(value, bool):
+                raise GraphError(f"{source}.allow_additional_peer_routes содержит некорректное правило.")
+            additional_by_source[path] = value
+    else:
+        additional_by_source = additional
+
+    forbidden_edges: list[tuple[str, str]] = []
+    raw_forbidden_edges = raw.get("forbidden_edges", [])
+    if not isinstance(raw_forbidden_edges, list):
+        raise GraphError(f"{source}.forbidden_edges должен быть массивом.")
+    for index, item in enumerate(raw_forbidden_edges):
+        edge = _topology_edge(item, f"{source}.forbidden_edges[{index}]")
+        if edge in forbidden_edges:
+            raise GraphError(f"{source}.forbidden_edges содержит дубликат {edge[0]} -> {edge[1]}.")
+        if edge in required_edges:
+            raise GraphError(f"{source}: edge {edge[0]} -> {edge[1]} одновременно required и forbidden.")
+        forbidden_edges.append(edge)
+    name = raw.get("name", source)
+    if not isinstance(name, str) or not name.strip():
+        raise GraphError(f"{source}.name должен быть непустой строкой.")
+    return {
+        "name": name.strip(),
+        "allowed_root_nodes": allowed_roots,
+        "required_root_nodes": required_roots,
+        "required_edges": required_edges,
+        "parent_rules": parent_rules,
+        "allow_additional_peer_routes": additional_by_source,
+        "forbidden_edges": forbidden_edges,
+        # The historical default tolerated unrelated authority roots and only
+        # constrained the top-level authority root's outgoing routes.  For an
+        # explicit policy, top-level sources are derived from required_edges:
+        # they are required-edge parents that are not required-edge children.
+        "enforce_allowed_root_nodes": not implicit_default and roots_declared,
+        "strict_route_sources": (
+            {"AGENTS.md"}
+            if implicit_default
+            else (
+                {source_path for source_path, _ in required_edges}
+                - {target_path for _, target_path in required_edges}
+            )
+        ),
+    }
+
+
+def load_topology_config(path: Path | None, root: Path) -> dict[str, Any] | None:
+    if path is not None:
+        value = load_json(path)
+        if not isinstance(value, dict):
+            raise GraphError(f"{path} должен быть JSON-объектом.")
+        return value
+    lexical_root = root.expanduser().absolute()
+    try:
+        resolved_root = lexical_root.resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise GraphError("repository topology policy requires an existing --root directory.") from exc
+    for relative in TOPOLOGY_CONFIG_CANDIDATES:
+        candidate = lexical_root / relative
+        try:
+            resolved_candidate = candidate.resolve(strict=True)
+        except FileNotFoundError:
+            # A symlinked directory with no candidate policy is not an
+            # attempted policy traversal. Preserve the default behavior.
+            continue
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise GraphError(f"repository topology policy is outside --root: {candidate}.") from exc
+        if not resolved_candidate.is_file():
+            continue
+        current = candidate
+        while True:
+            if current.is_symlink():
+                raise GraphError(
+                    f"repository topology policy passes through a symlink: {candidate}."
+                )
+            if current == lexical_root:
+                break
+            if current == current.parent:
+                raise GraphError(f"repository topology policy is outside --root: {candidate}.")
+            current = current.parent
+        try:
+            resolved_candidate.relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise GraphError(f"repository topology policy is outside --root: {candidate}.") from exc
+        value = load_json(resolved_candidate)
+        if not isinstance(value, dict):
+            raise GraphError(f"{resolved_candidate} должен быть JSON-объектом.")
+        return value
+    return None
+
+
+def final_topology_issues(
+    graph: dict[str, Any], topology_config: dict[str, Any] | None = None
+) -> list[str]:
+    config = normalize_topology_config(topology_config)
+    allowed_roots = set(config["allowed_root_nodes"])
+    required_roots = set(config["required_root_nodes"])
+    required_edges = set(config["required_edges"])
     issues: list[str] = []
-    missing_units = required_paths - unit_paths
+    unit_paths = {unit["path"] for unit in graph["scope"]["units"]}
+    missing_units = required_roots - unit_paths
     if missing_units:
-        issues.append("отсутствуют scope units: " + ", ".join(sorted(missing_units)))
+        issues.append(
+            f"topology rule required root nodes: missing scope units {', '.join(sorted(missing_units))}"
+        )
 
     artifacts_by_path: dict[str, str] = {}
     artifact_nodes: dict[str, dict[str, Any]] = {}
+    authority_root_paths: set[str] = set()
     for node in graph["nodes"]:
         if node.get("type") != "artifact":
             continue
         artifact_nodes[node["id"]] = node
-        if (
-            node.get("artifact_kind") == "root_instruction"
-            and node.get("authority") is True
-        ):
-            artifacts_by_path[node["source"]["path"]] = node["id"]
-    missing_artifacts = required_paths - set(artifacts_by_path)
+        if node.get("artifact_kind") == "root_instruction" and node.get("authority") is True:
+            path = node["source"]["path"]
+            if path in artifacts_by_path:
+                issues.append(f"topology rule root nodes: duplicate authority artifact {path}")
+            artifacts_by_path[path] = node["id"]
+            authority_root_paths.add(path)
+    missing_artifacts = required_roots - set(artifacts_by_path)
     if missing_artifacts:
         issues.append(
-            "отсутствуют authority artifact nodes: " + ", ".join(sorted(missing_artifacts))
+            "topology rule required root nodes: missing authority artifacts "
+            + ", ".join(sorted(missing_artifacts))
+        )
+    unexpected_roots = authority_root_paths - allowed_roots
+    if config["enforce_allowed_root_nodes"] and unexpected_roots:
+        issues.append(
+            "topology rule allowed root nodes: unexpected authority artifacts "
+            + ", ".join(sorted(unexpected_roots))
         )
 
     contract_unit_paths = {
@@ -1260,7 +1527,7 @@ def final_topology_issues(graph: dict[str, Any]) -> list[str]:
         )
 
     incoming_routes: dict[str, list[str]] = defaultdict(list)
-    outgoing_routes: dict[str, list[str]] = defaultdict(list)
+    route_pairs: list[tuple[str, str, str]] = []
     for edge in graph["edges"]:
         if edge.get("type") != "routes_to" or edge.get("status") != "confirmed":
             continue
@@ -1268,41 +1535,80 @@ def final_topology_issues(graph: dict[str, Any]) -> list[str]:
         target = artifact_nodes.get(edge.get("to"))
         if source is not None and target is not None:
             incoming_routes[target["id"]].append(source["id"])
-            outgoing_routes[source["id"]].append(target["id"])
-    expected_root_parents = {
-        "AGENTS.md": [],
-        "DOCS.md": ["AGENTS.md"],
-        "MODEL.md": ["DOCS.md"],
-        "WORKFLOW.md": ["DOCS.md"],
-    }
-    for target_path, expected_parent_paths in expected_root_parents.items():
-        target_id = artifacts_by_path.get(target_path)
-        expected_parent_ids = [
-            artifacts_by_path[path]
-            for path in expected_parent_paths
-            if path in artifacts_by_path
+            route_pairs.append((source["source"]["path"], target["source"]["path"], edge["id"]))
+
+    for parent_path, child_path in sorted(required_edges):
+        parent_id = artifacts_by_path.get(parent_path)
+        child_id = artifacts_by_path.get(child_path)
+        actual = [
+            (source, target, edge_id)
+            for source, target, edge_id in route_pairs
+            if target == child_path
         ]
-        if target_id is None or len(expected_parent_ids) != len(expected_parent_paths):
+        if parent_id is None or child_id is None:
             continue
-        actual_parent_ids = incoming_routes.get(target_id, [])
-        if actual_parent_ids != expected_parent_ids:
-            actual_paths = sorted(
-                artifact_nodes[parent_id]["source"]["path"] for parent_id in actual_parent_ids
-            )
+        if not any(source == parent_path and target == child_path for source, target, _ in actual):
+            actual_edges = sorted(f"{source} -> {target} ({edge_id})" for source, target, edge_id in actual)
+            detail = ", ".join(actual_edges) if actual_edges else "none"
             issues.append(
-                f"root {target_path} требует parents {expected_parent_paths}; найдено {actual_paths}"
+                f"topology rule required edge {parent_path} -> {child_path}: "
+                f"missing; actual confirmed incoming edges: {detail}"
             )
-    agents_id = artifacts_by_path.get("AGENTS.md")
-    docs_id = artifacts_by_path.get("DOCS.md")
-    if agents_id is not None and docs_id is not None:
-        actual_children = outgoing_routes.get(agents_id, [])
-        if actual_children != [docs_id]:
-            actual_paths = sorted(
-                artifact_nodes[child_id]["source"]["path"] for child_id in actual_children
-            )
+
+    parent_rules: dict[str, str] = config["parent_rules"]
+    for target_path, rule in sorted(parent_rules.items()):
+        target_id = artifacts_by_path.get(target_path)
+        if target_id is None:
+            continue
+        actual_parent_paths = sorted(
+            artifact_nodes[parent_id]["source"]["path"]
+            for parent_id in incoming_routes.get(target_id, [])
+        )
+        actual_parent_edges = sorted(
+            f"{edge_source_path} -> {edge_target_path} ({edge_id})"
+            for edge_source_path, edge_target_path, edge_id in route_pairs
+            if edge_target_path == target_path
+        )
+        if rule == "none" and actual_parent_paths:
             issues.append(
-                f"AGENTS.md должен иметь единственный routes_to DOCS.md; найдено {actual_paths}"
+                f"topology rule parent count {target_path}=none: "
+                f"actual confirmed parents {actual_parent_paths}; edges {actual_parent_edges}"
             )
+        elif rule == "exactly_one" and len(actual_parent_paths) != 1:
+            issues.append(
+                f"topology rule parent count {target_path}=exactly_one: "
+                f"actual confirmed parents {actual_parent_paths}; edges {actual_parent_edges}"
+            )
+
+    allowed_additional = config["allow_additional_peer_routes"]
+    strict_route_sources = config["strict_route_sources"]
+    for source_path, target_path, edge_id in sorted(route_pairs):
+        if (source_path, target_path) in config["forbidden_edges"]:
+            issues.append(
+                f"topology rule forbidden edge {source_path} -> {target_path}: "
+                f"found confirmed routes_to edge {source_path} -> {target_path} ({edge_id})"
+            )
+        if source_path not in allowed_roots or (source_path, target_path) in required_edges:
+            continue
+        is_peer_route = target_path in allowed_roots
+        if not is_peer_route:
+            if source_path in strict_route_sources:
+                issues.append(
+                    f"topology rule additional routes disallowed for {source_path}: "
+                    "allow_additional_peer_routes only permits allowed peer roots; "
+                    f"found confirmed edge {source_path} -> {target_path} ({edge_id})"
+                )
+            continue
+        if isinstance(allowed_additional, dict):
+            permit = allowed_additional.get(source_path, False)
+        else:
+            permit = allowed_additional
+        if not permit:
+            issues.append(
+                f"topology rule additional routes disallowed for {source_path}: "
+                f"found confirmed edge {source_path} -> {target_path} ({edge_id})"
+            )
+
     for node_id, node in sorted(artifact_nodes.items()):
         if node.get("artifact_kind") != "contract":
             continue
@@ -1371,7 +1677,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--final-topology-gate",
         action="store_true",
-        help="Применить migration gate и потребовать AGENTS/DOCS/MODEL/WORKFLOW с routing",
+        help="Применить migration gate и проверить настроенную final-topology policy",
+    )
+    parser.add_argument(
+        "--topology-config",
+        "--final-topology-config",
+        dest="topology_config",
+        help=(
+            "JSON policy для --final-topology-gate; без него используется ближайший "
+            ".codex/final-topology.json или исторический default"
+        ),
     )
     return parser.parse_args()
 
@@ -1389,7 +1704,9 @@ def main() -> int:
         validate_schema_contract(schema)
         report = validate_and_check(graph, Path(args.root))
         if args.final_topology_gate:
-            topology_issues = final_topology_issues(graph)
+            topology_path = Path(args.topology_config).expanduser().resolve() if args.topology_config else None
+            topology_config = load_topology_config(topology_path, Path(args.root).expanduser().resolve())
+            topology_issues = final_topology_issues(graph, topology_config)
             if topology_issues:
                 add_finding(
                     report["findings"],
