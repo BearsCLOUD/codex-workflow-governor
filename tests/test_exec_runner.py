@@ -1420,6 +1420,129 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             loop=self.loop_config(max_failures=max_failures),
         )
 
+    def outcome_workflow(self, name: str = "outcome-contract") -> Path:
+        discovery = {
+            "type": "object",
+            "properties": {
+                "selected_cursor": {"type": "string"},
+                "selected": {"type": "boolean"},
+            },
+            "required": ["selected_cursor", "selected"],
+            "additionalProperties": False,
+        }
+        delivery = {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["delivered", "no-issue", "blocked"]},
+                "committed_cursor": {"type": "string"},
+            },
+            "required": ["status", "committed_cursor"],
+            "additionalProperties": False,
+        }
+        review = {
+            "type": "object",
+            "properties": {"verdict": {"type": "string"}, "findings": {"type": "array", "items": {"type": "string"}}},
+            "required": ["verdict", "findings"],
+            "additionalProperties": False,
+        }
+        loop = self.loop_config(max_failures=2)
+        loop.update(
+            {
+                "cursor": "tasks.deliver.output.committed_cursor",
+                "cursor_input": "cursor",
+                "outcome": {
+                    "path": "tasks.deliver.output.status",
+                    "success_values": ["delivered", "no-issue"],
+                    "failure_values": ["blocked"],
+                    "failure_key": "tasks.discover.output.selected_cursor",
+                    "feedback_path": "tasks.review.output",
+                    "feedback_input": "repair-context",
+                },
+            }
+        )
+        tasks = [
+            {"id": "discover", "depends_on": [], "prompt": "DISCOVER {{ inputs.cursor }}", "output_schema": "schemas/discovery.json"},
+            {"id": "review", "depends_on": ["discover"], "prompt": "REVIEW {{ tasks.discover.output }}", "output_schema": "schemas/review.json"},
+            {"id": "implement", "depends_on": ["discover"], "prompt": "IMPLEMENT {{ inputs.repair-context }}", "output_schema": "schemas/review.json"},
+            {"id": "deliver", "depends_on": ["discover", "review", "implement"], "prompt": "DELIVER", "output_schema": "schemas/delivery.json"},
+        ]
+        return self.write_workflow(
+            name,
+            tasks,
+            {"discovery": discovery, "delivery": delivery, "review": review},
+            inputs={"cursor": "string", "source": "string", "repair-context": "object"},
+            max_parallel=1,
+            loop=loop,
+        )
+
+    def test_outcome_contract_and_legacy_loop_compatibility(self) -> None:
+        workflow = self.outcome_workflow()
+        loaded = load_workflow(workflow / "workflow.json", self.project)
+        self.assertEqual(loaded["loop"]["outcome"]["failure_values"], ["blocked"])
+        raw = json.loads((workflow / "workflow.json").read_text(encoding="utf-8"))
+        raw["loop"]["outcome"]["success_values"] = ["delivered", "blocked"]
+        (workflow / "workflow.json").write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaisesRegex(ContractError, "must not overlap"):
+            load_workflow(workflow / "workflow.json", self.project)
+        raw["loop"]["outcome"]["success_values"] = ["delivered"]
+        (workflow / "workflow.json").write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaisesRegex(ContractError, "completely cover"):
+            load_workflow(workflow / "workflow.json", self.project)
+        raw["loop"].pop("outcome")
+        (workflow / "workflow.json").write_text(json.dumps(raw), encoding="utf-8")
+        legacy = load_workflow(workflow / "workflow.json", self.project)
+        self.assertIsNone(legacy["loop"]["outcome"])
+
+    def test_semantic_failure_preserves_checkpoint_and_opens_keyed_circuit(self) -> None:
+        workflow = self.outcome_workflow("outcome-run")
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            code, _, stderr = self.invoke(
+                "run",
+                str(workflow),
+                "--input", 'cursor="old"',
+                "--input", 'source="fixture"',
+                "--input", 'repair-context={}',
+                "--codex-bin", str(self.fake_codex),
+                "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+
+        async def fake_cycle(cycle_dir: Path) -> int:
+            state = json.loads((cycle_dir / "run.json").read_text(encoding="utf-8"))
+            outputs = {
+                "discover": {"selected_cursor": "issue-6", "selected": True},
+                "review": {"verdict": "changes-required", "findings": ["finding"]},
+                "implement": {"verdict": "approved", "findings": []},
+                "deliver": {"status": "blocked", "committed_cursor": "old"},
+            }
+            for task_id, output in outputs.items():
+                task_dir = cycle_dir / "tasks" / task_id
+                task_dir.mkdir(parents=True, exist_ok=True)
+                implementation._atomic_json(task_dir / "final.json", output)
+                state["tasks"][task_id] = {"status": "completed"}
+            state["status"] = "completed"
+            implementation._atomic_json(cycle_dir / "run.json", state)
+            return 0
+
+        async def keep_running(_target: Path, _wake_at: object) -> str:
+            return "running"
+
+        with patch("workflow_governor._exec_runner_impl._execute_run", new=fake_cycle), patch(
+            "workflow_governor._exec_runner_impl._wait_for_loop_wake", new=keep_running
+        ):
+            self.assertEqual(asyncio.run(execute_run(run_dir)), 1)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "circuit-open")
+        self.assertEqual(state["checkpoint"]["cycle_id"], 0)
+        self.assertEqual(state["consecutive_failures"], 2)
+        self.assertEqual(state["failure_key_digest"], implementation.digest_json("issue-6"))
+        feedback = json.loads((run_dir / "feedback.json").read_text(encoding="utf-8"))
+        self.assertEqual(feedback["key"], "issue-6")
+        lifecycle = (run_dir / "STATE.md").read_text(encoding="utf-8")
+        self.assertNotIn("finding", lifecycle)
+
     def test_loop_contract_plan_and_write_isolation_validation(self) -> None:
         workflow = self.write_loop("loop-plan")
 

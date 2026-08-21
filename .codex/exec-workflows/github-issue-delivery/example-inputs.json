@@ -3,5 +3,6 @@
   "cursor": "1970-01-01T00:00:00Z|00000000000000000000",
   "authoritative-branch": "main",
   "canonical-checkout": "/home/ai1/workflow_plugin",
-  "plugin-selector": "codex-workflow-governor@personal"
+  "plugin-selector": "codex-workflow-governor@personal",
+  "repair-context": {}
 }

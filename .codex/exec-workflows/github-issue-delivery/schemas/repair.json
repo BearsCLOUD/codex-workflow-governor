@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["repaired", "no-repair", "blocked"]},
+    "addressed_findings": {"type": "array", "items": {"type": "string"}},
+    "unresolved_findings": {"type": "array", "items": {"type": "string"}},
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "validations": {"type": "array", "items": {"type": "string"}},
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "addressed_findings", "unresolved_findings", "changed_files", "validations", "blockers"],
+  "additionalProperties": false
+}

@@ -373,6 +373,7 @@ def _validate_loop_value(value: Any, inputs: Mapping[str, str]) -> dict[str, Any
         "instance_key",
         "retain_cycles",
         "permissions",
+        "outcome",
     }
     _require_keys(value, "workflow.loop", required, optional)
     if value["mode"] != "until-cancelled":
@@ -446,6 +447,30 @@ def _validate_loop_value(value: Any, inputs: Mapping[str, str]) -> dict[str, Any
         if not isinstance(permission, bool):
             raise ContractError(f"workflow.loop.permissions.{name}", "must be a boolean")
         permissions[name] = permission
+    outcome = value.get("outcome")
+    if outcome is not None:
+        if not isinstance(outcome, dict):
+            raise ContractError("workflow.loop.outcome", "must be an object")
+        _require_keys(
+            outcome,
+            "workflow.loop.outcome",
+            {"path", "success_values", "failure_values", "failure_key", "feedback_path", "feedback_input"},
+        )
+        for field in ("path", "failure_key", "feedback_path", "feedback_input"):
+            if not isinstance(outcome[field], str) or not outcome[field].strip():
+                raise ContractError(f"workflow.loop.outcome.{field}", "must be a non-empty string")
+        for field in ("success_values", "failure_values"):
+            values = outcome[field]
+            if not isinstance(values, list) or not values or not all(isinstance(item, str) and item for item in values):
+                raise ContractError(f"workflow.loop.outcome.{field}", "must be a non-empty string array")
+            if len(set(values)) != len(values):
+                raise ContractError(f"workflow.loop.outcome.{field}", "contains duplicate values")
+        if set(outcome["success_values"]) & set(outcome["failure_values"]):
+            raise ContractError("workflow.loop.outcome", "success_values and failure_values must not overlap")
+        if outcome["feedback_input"] not in inputs:
+            raise ContractError("workflow.loop.outcome.feedback_input", "must name a declared workflow input")
+        if inputs[outcome["feedback_input"]] != "object":
+            raise ContractError("workflow.loop.outcome.feedback_input", "must name an object workflow input")
     return {
         "mode": "until-cancelled",
         "interval_seconds": interval,
@@ -460,6 +485,7 @@ def _validate_loop_value(value: Any, inputs: Mapping[str, str]) -> dict[str, Any
         "instance_key": instance_key,
         "retain_cycles": retain_cycles,
         "permissions": permissions,
+        "outcome": outcome,
     }
 
 
@@ -567,6 +593,18 @@ def _schema_type_at(schema: Mapping[str, Any], suffix: list[str], path: str) -> 
     if not isinstance(value, str):
         raise ContractError(path, "does not resolve to a typed output field")
     return value
+
+
+def _schema_node_at(schema: Mapping[str, Any], suffix: list[str], path: str) -> Mapping[str, Any]:
+    current: Mapping[str, Any] = schema
+    for part in suffix:
+        if current.get("type") == "object" and part in current.get("properties", {}):
+            current = current["properties"][part]
+        elif current.get("type") == "array" and part.isdigit():
+            current = current["items"]
+        else:
+            raise ContractError(path, f"does not exist in the declared output schema at {part!r}")
+    return current
 
 
 def _validate_expression(
@@ -956,6 +994,63 @@ def load_workflow(
                 inputs=inputs,
                 local_allowed=False,
             )
+        outcome = loop.get("outcome")
+        if outcome is not None:
+            def outcome_path_parts(field: str, *, allow_root: bool = False) -> tuple[str, list[str]]:
+                raw_path = outcome[field]
+                parts = raw_path.split(".")
+                if (len(parts) < 3 or (len(parts) < 4 and not allow_root)) or parts[0] != "tasks" or parts[2] != "output":
+                    raise ContractError(f"workflow.loop.outcome.{field}", "must have the form tasks.TASK.output[.FIELD]")
+                producer_id = parts[1]
+                if producer_id not in tasks:
+                    raise ContractError(f"workflow.loop.outcome.{field}", f"unknown task {producer_id!r}")
+                if tasks[producer_id].get("foreach"):
+                    raise ContractError(f"workflow.loop.outcome.{field}", "must not select a fan-out task output")
+                return producer_id, parts[3:]
+
+            outcome_producer, outcome_suffix = outcome_path_parts("path")
+            cursor_producer = cursor_parts[1]
+            leaf_tasks = set(tasks) - {
+                dependency
+                for task in tasks.values()
+                for dependency in task["depends_on"]
+            }
+            if outcome_producer != cursor_producer or outcome_producer not in leaf_tasks:
+                raise ContractError(
+                    "workflow.loop.outcome.path",
+                    "must belong to the same leaf task as workflow.loop.cursor",
+                )
+            outcome_node = _schema_node_at(tasks[outcome_producer]["_schema"], outcome_suffix, outcome["path"])
+            if outcome_node.get("type") != "string" or not isinstance(outcome_node.get("enum"), list):
+                raise ContractError("workflow.loop.outcome.path", "must resolve to a string enum output field")
+            enum_values = outcome_node["enum"]
+            if not all(isinstance(item, str) for item in enum_values):
+                raise ContractError("workflow.loop.outcome.path", "enum values must be strings")
+            mapped = set(outcome["success_values"]) | set(outcome["failure_values"])
+            if mapped != set(enum_values):
+                raise ContractError(
+                    "workflow.loop.outcome",
+                    "success_values and failure_values must completely cover the outcome enum",
+                )
+            failure_producer, failure_suffix = outcome_path_parts("failure_key")
+            failure_node = _schema_node_at(tasks[failure_producer]["_schema"], failure_suffix, outcome["failure_key"])
+            if failure_node.get("type") != "string":
+                raise ContractError("workflow.loop.outcome.failure_key", "must resolve to a string output field")
+            feedback_producer, feedback_suffix = outcome_path_parts("feedback_path", allow_root=True)
+            feedback_node = _schema_node_at(tasks[feedback_producer]["_schema"], feedback_suffix, outcome["feedback_path"])
+            if feedback_node.get("type") != "object" or feedback_node.get("additionalProperties") is not False:
+                raise ContractError("workflow.loop.outcome.feedback_path", "must resolve to a strict object output")
+            for task_id, task in tasks.items():
+                references_feedback = any(
+                    expression.strip() == f"inputs.{outcome['feedback_input']}"
+                    or expression.strip().startswith(f"inputs.{outcome['feedback_input']}.")
+                    for expression in PLACEHOLDER.findall(task["prompt"])
+                )
+                if references_feedback and failure_producer not in _transitive_dependencies(tasks, task_id):
+                    raise ContractError(
+                        f"workflow.tasks.{task_id}",
+                        "feedback consumers must depend transitively on the outcome failure_key producer",
+                    )
     return {
         "schema_version": schema_version,
         "workflow_id": workflow_id,
@@ -2131,7 +2226,9 @@ async def _execute_run(run_dir: Path) -> int:
     workflow = load_workflow(run_dir / "workflow" / "workflow.json", project)
     if _workflow_digest(workflow) != state.get("workflow_digest"):
         raise ContractError("run.workflow_digest", "snapshot no longer matches queued run authority")
-    inputs = state["inputs"]
+    # Keep dynamically bound repair feedback in memory/private binding artifacts;
+    # lifecycle run.json must not gain raw findings.
+    inputs = dict(state["inputs"])
     if loop_run_dir is not None:
         permissions = state.get("loop_permissions", {})
         allowed = sorted(name for name, enabled in permissions.items() if enabled)
@@ -2157,6 +2254,81 @@ async def _execute_run(run_dir: Path) -> int:
         cancel_event.set()
     outputs: dict[str, Any] = {}
     done_events = {task_id: asyncio.Event() for task_id in workflow["tasks"]}
+    loop_outcome = (
+        workflow.get("loop", {}).get("outcome")
+        if loop_run_dir is not None
+        else None
+    )
+
+    async def bind_loop_feedback() -> None:
+        if loop_outcome is None:
+            return
+        producer = loop_outcome["failure_key"].split(".")[1]
+        if producer not in outputs:
+            return
+        key = _resolve_path(loop_outcome["failure_key"], inputs, outputs, {})
+        if not isinstance(key, str):
+            raise ContractError("workflow.loop.outcome.failure_key", "resolved value must be a string")
+        binding_path = _cycle_feedback_binding_path(run_dir)
+        if binding_path.is_file():
+            binding = _read_json(binding_path)
+            if not isinstance(binding, dict) or set(binding) != {"key", "value", "matched"}:
+                raise ContractError(str(binding_path), "must contain exactly key, value, and matched")
+            if binding["key"] != key or not isinstance(binding["value"], dict) or not isinstance(binding["matched"], bool):
+                raise ContractError(str(binding_path), "does not match the completed failure-key output")
+            value = binding["value"]
+            matched = binding["matched"]
+        else:
+            envelope = _read_loop_feedback(loop_run_dir)
+            matched = envelope is not None and envelope["key"] == key
+            value = envelope["value"] if matched and envelope is not None else {}
+            _atomic_json(binding_path, {"key": key, "value": value, "matched": matched})
+        feedback_path = loop_outcome["feedback_path"]
+        feedback_parts = feedback_path.split(".")
+        feedback_schema = _schema_node_at(
+            workflow["tasks"][feedback_parts[1]]["_schema"],
+            feedback_parts[3:],
+            feedback_path,
+        )
+        if matched:
+            _validate_instance(value, feedback_schema, "workflow.loop.outcome.feedback_path")
+        inputs[loop_outcome["feedback_input"]] = value
+        binding_state = {
+            "key_digest": digest_json(key),
+            "value_digest": digest_json(value),
+            "matched": matched,
+        }
+        await store.update(
+            lambda current: current.update(
+                {
+                    "feedback_binding": binding_state,
+                    "effective_input_digest": digest_json(inputs),
+                }
+            )
+        )
+        _loop_transition(
+            loop_run_dir,
+            "feedback.bound",
+            {
+                "key_digest": binding_state["key_digest"],
+                "value_digest": binding_state["value_digest"],
+                "matched": matched,
+            },
+            lambda current: current.update(
+                {
+                    "current_input_digest": digest_json(inputs),
+                    "feedback_binding": binding_state,
+                }
+            ),
+        )
+        await store.event(
+            "feedback.bound",
+            {
+                "key_digest": binding_state["key_digest"],
+                "value_digest": binding_state["value_digest"],
+                "matched": matched,
+            },
+        )
 
     async def watch_cancel() -> None:
         last_heartbeat = 0.0
@@ -2184,6 +2356,8 @@ async def _execute_run(run_dir: Path) -> int:
                     f"run.tasks.{task_id}", "completed task is missing final.json"
                 )
             outputs[task_id] = _read_json(completed_path)
+            if loop_outcome is not None and task_id == loop_outcome["failure_key"].split(".")[1]:
+                await bind_loop_feedback()
             return
         if current_status in {"failed", "blocked", "cancelled"}:
             return
@@ -2363,6 +2537,8 @@ async def _execute_run(run_dir: Path) -> int:
             )
             if ok:
                 outputs[task_id] = output
+                if loop_outcome is not None and task_id == loop_outcome["failure_key"].split(".")[1]:
+                    await bind_loop_feedback()
                 await store.update(lambda current: current["tasks"][task_id].update({"status": "completed", "finished_at": utc_now()}))
             else:
                 status = "cancelled" if cancel_event.is_set() else "failed"
@@ -2491,6 +2667,35 @@ def _cycle_call_usage(cycle_dir: Path, planned: int) -> dict[str, int]:
     }
 
 
+def _loop_feedback_path(loop_run_dir: Path) -> Path:
+    return loop_run_dir / "feedback.json"
+
+
+def _cycle_feedback_binding_path(cycle_dir: Path) -> Path:
+    return cycle_dir / "feedback-binding.json"
+
+
+def _read_loop_feedback(loop_run_dir: Path) -> dict[str, Any] | None:
+    path = _loop_feedback_path(loop_run_dir)
+    if not path.is_file():
+        return None
+    value = _read_json(path)
+    if not isinstance(value, dict) or set(value) != {"key", "value"}:
+        raise ContractError(str(path), "must contain exactly key and value")
+    if not isinstance(value["key"], str) or not isinstance(value["value"], dict):
+        raise ContractError(str(path), "key must be a string and value must be an object")
+    return value
+
+
+def _write_loop_feedback(loop_run_dir: Path, key: str, value: Mapping[str, Any]) -> None:
+    _atomic_json(_loop_feedback_path(loop_run_dir), {"key": key, "value": dict(value)})
+
+
+def _clear_loop_feedback(loop_run_dir: Path) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        _loop_feedback_path(loop_run_dir).unlink()
+
+
 def _cycle_worktree(project: Path, cycle_dir: Path) -> Path:
     worktree = cycle_dir / "worktree"
     if worktree.is_dir():
@@ -2530,6 +2735,9 @@ def _prepare_loop_cycle(
     cursor_input = workflow["loop"].get("cursor_input")
     if cursor_input:
         cycle_inputs[cursor_input] = outer_state["checkpoint"].get("cursor")
+    outcome = workflow["loop"].get("outcome")
+    if outcome is not None:
+        cycle_inputs[outcome["feedback_input"]] = {}
     validate_typed_values(cycle_inputs, workflow["inputs"], "inputs")
     planned_tasks, planned_calls = _execution_plan(workflow, cycle_inputs)
     budget = int(outer_state["cycle_call_budget"])
@@ -2570,6 +2778,8 @@ def _prepare_loop_cycle(
         "updated_at": utc_now(),
         "leaf_tasks": leaves,
         "tasks": {task_id: {"status": "pending"} for task_id in workflow["order"]},
+        "feedback_binding": None,
+        "effective_input_digest": digest_json(cycle_inputs),
     }
     _atomic_json(state_path, cycle_state)
     return cycle_dir, cycle_state
@@ -2738,8 +2948,34 @@ async def _execute_loop_run(run_dir: Path) -> int:
         call_usage = _cycle_call_usage(cycle_dir, planned_calls)
         task_summary = cycle_state.get("tasks", {})
         output_digest = digest_json(outputs)
-        success = cycle_state.get("status") == "completed"
+        technical_success = cycle_state.get("status") == "completed"
+        outcome = workflow["loop"].get("outcome")
+        semantic_status: str | None = None
+        failure_key: str | None = None
+        feedback_value: dict[str, Any] | None = None
+        if technical_success and outcome is not None:
+            semantic_status = _resolve_path(outcome["path"], cycle_state["inputs"], outputs, {})
+            if semantic_status not in set(outcome["success_values"]) | set(outcome["failure_values"]):
+                raise ContractError("workflow.loop.outcome.path", "resolved value is not covered by the declared mappings")
+            if semantic_status in outcome["failure_values"]:
+                failure_key = _resolve_path(outcome["failure_key"], cycle_state["inputs"], outputs, {})
+                feedback_value = _resolve_path(outcome["feedback_path"], cycle_state["inputs"], outputs, {})
+                if not isinstance(failure_key, str) or not isinstance(feedback_value, dict):
+                    raise ContractError("workflow.loop.outcome", "resolved failure key and feedback must match their declared types")
+                _validate_instance(
+                    feedback_value,
+                    _schema_node_at(
+                        workflow["tasks"][outcome["feedback_path"].split(".")[1]]["_schema"],
+                        outcome["feedback_path"].split(".")[3:],
+                        outcome["feedback_path"],
+                    ),
+                    "workflow.loop.outcome.feedback_path",
+                )
+                _write_loop_feedback(run_dir, failure_key, feedback_value)
+        success = technical_success and (outcome is None or semantic_status in outcome["success_values"])
         if success:
+            if outcome is not None:
+                _clear_loop_feedback(run_dir)
             cursor = _resolve_path(workflow["loop"]["cursor"], cycle_state["inputs"], outputs, {})
             checkpoint = {
                 "schema_version": "codex-exec-loop-checkpoint.v1",
@@ -2764,6 +3000,8 @@ async def _execute_loop_run(run_dir: Path) -> int:
                         "last_task_summary": task_summary,
                         "call_usage": call_usage,
                         "consecutive_failures": 0,
+                        "failure_key_digest": None,
+                        "outcome_status": semantic_status,
                         "circuit_breaker": "closed",
                         "error": None,
                     }
@@ -2776,10 +3014,27 @@ async def _execute_loop_run(run_dir: Path) -> int:
                 complete_cycle,
             )
         else:
-            error = "cycle timeout" if timed_out else str(cycle_state.get("error") or "cycle failed")
+            error = (
+                "cycle timeout"
+                if timed_out
+                else (
+                    f"semantic outcome {semantic_status!r}"
+                    if technical_success and outcome is not None
+                    else str(cycle_state.get("error") or "cycle failed")
+                )
+            )
+            if failure_key is not None:
+                failure_key_digest = digest_json(failure_key)
+            else:
+                failure_key_digest = digest_json({"technical_failure": _redact_text(error)})
 
             def fail_cycle(current: dict[str, Any]) -> None:
-                failures = int(current.get("consecutive_failures", 0)) + 1
+                previous_key_digest = current.get("failure_key_digest")
+                failures = (
+                    int(current.get("consecutive_failures", 0)) + 1
+                    if previous_key_digest == failure_key_digest
+                    else 1
+                )
                 current.update(
                     {
                         "current_cycle_id": None,
@@ -2788,6 +3043,8 @@ async def _execute_loop_run(run_dir: Path) -> int:
                         "last_task_summary": task_summary,
                         "call_usage": call_usage,
                         "consecutive_failures": failures,
+                        "failure_key_digest": failure_key_digest,
+                        "outcome_status": semantic_status,
                         "error": _redact_text(error),
                     }
                 )
@@ -2795,7 +3052,12 @@ async def _execute_loop_run(run_dir: Path) -> int:
             state = _loop_transition(
                 run_dir,
                 "cycle.failed",
-                {"cycle_id": cycle_id, "timed_out": timed_out},
+                {
+                    "cycle_id": cycle_id,
+                    "timed_out": timed_out,
+                    "failure_key_digest": failure_key_digest,
+                    "feedback_digest": digest_json(feedback_value) if feedback_value is not None else None,
+                },
                 fail_cycle,
             )
 
@@ -2991,20 +3253,24 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
         shutil.rmtree(run_dir)
         raise
     if workflow.get("loop"):
+        loop_inputs = dict(inputs)
+        outcome = workflow["loop"].get("outcome")
+        if outcome is not None:
+            loop_inputs[outcome["feedback_input"]] = {}
         instance_key = _loop_instance_key(workflow, inputs)
         workflow_digest = _workflow_digest(workflow)
         registry_path = _claim_loop_instance(
             project, workflow["workflow_id"], workflow_digest, instance_key, run_id
         )
         cursor_input = workflow["loop"].get("cursor_input")
-        initial_cursor = inputs.get(cursor_input) if cursor_input else None
+        initial_cursor = loop_inputs.get(cursor_input) if cursor_input else None
         checkpoint = {
             "schema_version": "codex-exec-loop-checkpoint.v1",
             "run_id": run_id,
             "cycle_id": 0,
             "cursor": initial_cursor,
             "workflow_digest": workflow_digest,
-            "input_digest": digest_json(inputs),
+            "input_digest": digest_json(loop_inputs),
             "output_digest": None,
             "committed_at": None,
         }
@@ -3016,7 +3282,7 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
             "workflow_scope": scope,
             "workflow_digest": workflow_digest,
             "project_root": str(project),
-            "base_inputs": inputs,
+            "base_inputs": loop_inputs,
             "codex_bin": args.codex_bin,
             "max_parallel": args.max_parallel or workflow["max_parallel"],
             "cycle_call_budget": effective_call_budget,
@@ -3040,6 +3306,8 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
             "circuit_breaker": "closed",
             "next_wake_at": None,
             "error": None,
+            "failure_key_digest": None,
+            "feedback_binding": None,
         }
         _atomic_json(run_dir / "run.json", state)
         _atomic_json(run_dir / "checkpoint.json", checkpoint)
