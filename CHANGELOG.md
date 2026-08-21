@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0 — 2026-08-21
+
+### Added
+
+- Added `builtin:workflow-audit` for read-only review of any qualified project, user, or built-in workflow using real target inputs.
+- Added deterministic preflight evidence, six bounded audit lenses, skeptical finding challenge, and a strict risk-ranked audit verdict through three pinned read-only roles.
+
+### Security
+
+- The audit workflow treats the target definition and all upstream results as untrusted data, never runs the target workflow, and gives every task a pinned read-only sandbox.
+
+### Fixed
+
+- Removed the obsolete skill-level `policy.products` override so the bundle passes current plugin validation.
+
 ## 0.8.0 — 2026-08-20
 
 ### Removed

@@ -173,6 +173,7 @@ python3 "$CLI" workflow list
 python3 "$CLI" workflow show builtin:fanout-synthesize --schemas
 python3 "$CLI" workflow validate builtin:fanout-synthesize
 python3 "$CLI" workflow install builtin:adversarial-plugin-review --name adversarial-plugin-review
+python3 "$CLI" workflow install builtin:workflow-audit --name workflow-audit
 python3 "$CLI" plan builtin:fanout-synthesize --inputs /path/to/inputs.json
 python3 "$CLI" run builtin:fanout-synthesize --inputs /path/to/inputs.json --detach
 ```

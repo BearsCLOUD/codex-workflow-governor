@@ -101,6 +101,17 @@ python3 "$CLI" --project-root "$PROJECT" workflow install builtin:adversarial-pl
 python3 "$CLI" --project-root "$PROJECT" workflow validate project:adversarial-plugin-review
 ```
 
+Use the bundled workflow auditor when a custom workflow needs independent contract, security, failure-mode, agent, loop, and usability review without executing the target:
+
+```bash
+python3 "$CLI" --project-root "$PROJECT" workflow install builtin:workflow-audit --name workflow-audit
+python3 "$CLI" --project-root "$PROJECT" workflow validate project:workflow-audit
+python3 "$CLI" --project-root "$PROJECT" plan project:workflow-audit \
+  --inputs .codex/exec-workflows/workflow-audit/example-inputs.json
+python3 "$CLI" --project-root "$PROJECT" run project:workflow-audit \
+  --inputs .codex/exec-workflows/workflow-audit/example-inputs.json --detach
+```
+
 ## Safety and correctness
 
 - Keep `sandbox: read-only` unless writes are required. The runner serializes write-capable finite tasks project-wide. A persistent write task additionally requires `write_isolation: git-worktree`, and the supervisor creates a detached worktree for that cycle; the existing `--allow-workspace-write` or `--allow-danger-full-access` run opt-in is still mandatory.

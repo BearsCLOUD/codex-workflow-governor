@@ -118,6 +118,20 @@ python3 "$CLI" --project-root "$PROJECT" plan project:adversarial-plugin-review 
   --inputs .codex/exec-workflows/adversarial-plugin-review/example-inputs.json
 ```
 
+The v2 built-in `workflow-audit` template audits any qualified project, user, or built-in workflow without running it. It validates and plans the target with real inputs, applies independent contract, execution, security, agent, loop, and usability lenses, challenges candidate findings, and produces a strict audit verdict:
+
+```bash
+python3 "$CLI" --project-root "$PROJECT" workflow install \
+  builtin:workflow-audit --name workflow-audit
+python3 "$CLI" --project-root "$PROJECT" workflow validate project:workflow-audit
+python3 "$CLI" --project-root "$PROJECT" plan project:workflow-audit \
+  --inputs .codex/exec-workflows/workflow-audit/example-inputs.json
+python3 "$CLI" --project-root "$PROJECT" run project:workflow-audit \
+  --inputs .codex/exec-workflows/workflow-audit/example-inputs.json --detach
+```
+
+Set `target-workflow` to an explicit `project:`, `user:`, or `builtin:` reference and provide its real input object in `target-inputs`. The audit itself is read-only and never executes the target.
+
 See [`skills/codex-workflows/SKILL.md`](skills/codex-workflows/SKILL.md) for the calling-agent method, [`workflow-format.md`](skills/codex-workflows/references/workflow-format.md) for the base contract, and [`loop-workflows.md`](skills/codex-workflows/references/loop-workflows.md) for recurring lifecycle and recovery semantics.
 
 ## Other skills

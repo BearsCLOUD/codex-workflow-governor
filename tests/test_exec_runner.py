@@ -84,6 +84,14 @@ def classify(prompt: str) -> dict[str, object]:
         return {"kind": "github-triage"}
     if prompt.startswith("Produce a read-only operator report"):
         return {"kind": "github-report"}
+    if prompt.startswith("Perform a read-only preflight inspection"):
+        return {"kind": "workflow-inventory"}
+    if prompt.startswith("Perform a read-only adversarial audit"):
+        return {"kind": "workflow-audit-lens"}
+    if prompt.startswith("Act as a skeptical evidence challenger for"):
+        return {"kind": "workflow-audit-challenge"}
+    if prompt.startswith("Produce the final evidence-ranked audit verdict"):
+        return {"kind": "workflow-audit-verdict"}
     for kind in (
         "terminal-missing",
         "terminal-malformed",
@@ -362,6 +370,62 @@ try:
             "triaged": 1,
             "summary": "Fixture report",
             "unauthorized_mutations_blocked": True,
+        }
+    elif identity["kind"] == "workflow-inventory":
+        output = {
+            "status": "success",
+            "target_workflow": "builtin:fanout-synthesize",
+            "resolved_scope": "builtin",
+            "workflow_id": "fanout-synthesize",
+            "schema_version": "codex-exec-workflow.v1",
+            "validation_status": "valid",
+            "plan_status": "valid",
+            "workflow_digest": "fixture-digest",
+            "loop_mode": "finite",
+            "task_order": ["analyze-items", "synthesize"],
+            "task_count": 2,
+            "planned_calls": "6",
+            "resolved_agents": [],
+            "evidence": ["fixture:workflow.json"],
+            "errors": [],
+            "unresolved": [],
+        }
+    elif identity["kind"] == "workflow-audit-lens":
+        output = {
+            "status": "success",
+            "lens": "fixture-lens",
+            "summary": "No fixture defect",
+            "findings": [],
+            "tested_assumptions": ["Target plan is bounded"],
+            "no_issue_areas": ["Fixture lens"],
+            "unresolved": [],
+        }
+    elif identity["kind"] == "workflow-audit-challenge":
+        output = {
+            "status": "success",
+            "summary": "No candidate findings",
+            "inventory_assessment": "Preflight evidence is consistent",
+            "verdicts": [],
+            "cross_cutting_gaps": [],
+            "unresolved": [],
+            "reviewed_findings": 0,
+        }
+    elif identity["kind"] == "workflow-audit-verdict":
+        output = {
+            "status": "success",
+            "target_workflow": "builtin:fanout-synthesize",
+            "workflow_digest": "fixture-digest",
+            "validation_status": "valid",
+            "plan_status": "valid",
+            "audit_recommendation": "approve",
+            "summary": "Fixture workflow audit passed",
+            "confirmed_findings": [],
+            "rejected_or_duplicate_findings": [],
+            "coverage_gaps": [],
+            "required_actions": [],
+            "optional_improvements": [],
+            "reviewed_lenses": 3,
+            "reviewed_findings": 0,
         }
     elif identity["kind"] == "healthy-events":
         for index in range(6):
@@ -1031,6 +1095,50 @@ class WorkflowValidationTests(ExecRunnerTestCase):
         self.assertTrue(all(task["sandbox"] == "read-only" for task in plan["tasks"]))
         self.assertEqual(plan["tasks"][0]["agent"], "adversarial-reviewer")
         self.assertTrue(all(task["model"] == "gpt-5.6-sol" for task in plan["tasks"]))
+
+    def test_builtin_workflow_audit_installs_plans_and_runs_read_only(self) -> None:
+        install_code, _, install_stderr = self.invoke(
+            "workflow", "install", "builtin:workflow-audit", "--name", "workflow-audit"
+        )
+        self.assertEqual(install_code, 0, install_stderr)
+        code, stdout, stderr = self.invoke(
+            "workflow", "validate", "project:workflow-audit"
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(
+            json.loads(stdout)["task_order"],
+            ["inspect-workflow", "audit-lenses", "challenge-findings", "audit-verdict"],
+        )
+
+        audit_inputs = (
+            Path(__file__).resolve().parents[1]
+            / "skills/codex-workflows/assets/workflows/workflow-audit/example-inputs.json"
+        )
+        plan_code, plan_stdout, plan_stderr = self.invoke(
+            "plan", "project:workflow-audit", "--inputs", str(audit_inputs)
+        )
+        self.assertEqual(plan_code, 0, plan_stderr)
+        plan = json.loads(plan_stdout)
+        self.assertEqual(plan["planned_calls"], 18)
+        self.assertEqual(plan["max_parallel"], 6)
+        self.assertEqual(plan["tasks"][1]["fanout_items"], 6)
+        self.assertTrue(all(task["sandbox"] == "read-only" for task in plan["tasks"]))
+        self.assertTrue(all(task["model"] == "gpt-5.6-sol" for task in plan["tasks"]))
+        self.assertEqual(plan["tasks"][0]["agent"], "workflow-auditor")
+        self.assertEqual(plan["tasks"][-1]["agent"], "workflow-audit-judge")
+
+        run_code, run_stdout, run_stderr = self.invoke(
+            "run", "project:workflow-audit", "--inputs", str(audit_inputs),
+            "--codex-bin", str(self.fake_codex),
+        )
+        self.assertEqual(run_code, 0, run_stderr)
+        self.assertIn("completed", run_stdout)
+        result_code, result_stdout, result_stderr = self.invoke(
+            "result", self.only_run_dir().name
+        )
+        self.assertEqual(result_code, 0, result_stderr)
+        verdict = json.loads(result_stdout)["audit-verdict"]
+        self.assertEqual(verdict["audit_recommendation"], "approve")
 
     def test_non_standard_json_input_is_rejected_before_run_persistence(self) -> None:
         workflow = self.write_workflow(

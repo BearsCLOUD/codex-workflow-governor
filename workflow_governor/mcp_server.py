@@ -179,7 +179,7 @@ class McpServer:
                 result = {
                     "protocolVersion": request.get("params", {}).get("protocolVersion", "2025-06-18"),
                     "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": f"codex-workflow-governor-{self.surface}", "version": "0.8.0"},
+                    "serverInfo": {"name": f"codex-workflow-governor-{self.surface}", "version": "0.9.0"},
                 }
             elif method == "ping":
                 result = {}

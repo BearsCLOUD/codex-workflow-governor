@@ -1,0 +1,138 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "success",
+        "partial",
+        "blocked"
+      ]
+    },
+    "target_workflow": {
+      "type": "string"
+    },
+    "resolved_scope": {
+      "type": "string",
+      "enum": [
+        "project",
+        "user",
+        "builtin",
+        "unknown"
+      ]
+    },
+    "workflow_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "validation_status": {
+      "type": "string",
+      "enum": [
+        "valid",
+        "invalid",
+        "unavailable"
+      ]
+    },
+    "plan_status": {
+      "type": "string",
+      "enum": [
+        "valid",
+        "invalid",
+        "unavailable"
+      ]
+    },
+    "workflow_digest": {
+      "type": "string"
+    },
+    "loop_mode": {
+      "type": "string",
+      "enum": [
+        "finite",
+        "until-cancelled",
+        "unknown"
+      ]
+    },
+    "task_order": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "task_count": {
+      "type": "integer"
+    },
+    "planned_calls": {
+      "type": "string"
+    },
+    "resolved_agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "type": "string"
+          },
+          "sandbox": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "sha256",
+          "model",
+          "reasoning_effort",
+          "sandbox"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "status",
+    "target_workflow",
+    "resolved_scope",
+    "workflow_id",
+    "schema_version",
+    "validation_status",
+    "plan_status",
+    "workflow_digest",
+    "loop_mode",
+    "task_order",
+    "task_count",
+    "planned_calls",
+    "resolved_agents",
+    "evidence",
+    "errors",
+    "unresolved"
+  ],
+  "additionalProperties": false
+}

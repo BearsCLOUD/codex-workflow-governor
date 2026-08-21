@@ -1,0 +1,20 @@
+{
+  "target-workflow": "builtin:fanout-synthesize",
+  "target-inputs": {
+    "request": "Review the supplied items and synthesize the evidence.",
+    "items": [
+      "example-a",
+      "example-b"
+    ]
+  },
+  "objective": "Determine whether the target workflow is contract-correct, safe to execute under its declared permissions, bounded, testable, and reusable.",
+  "review-lenses": [
+    "Workflow schema, input types, strict output schemas, template references, and qualified target resolution",
+    "DAG dependencies, readiness, fan-out bounds, call budgets, timeouts, retries, and failure propagation",
+    "Sandbox, write authorization, path containment, untrusted-data handling, prompt injection, and destructive operations",
+    "Pinned agents, model and reasoning settings, snapshot drift, digest coverage, installation conflicts, and portability",
+    "Persistent-loop idempotency, checkpoints, recovery, pause, resume, cancellation, backoff, and write isolation when applicable",
+    "Documentation, example inputs, operator usability, test coverage, compatibility, clean installation, and false-green risks"
+  ],
+  "acceptance-criteria": "The target resolves and validates; the supplied inputs produce a bounded plan; schemas and dependencies fail closed; permissions are explicit and least-privilege; agent pins and loop invariants are consistent when used; documentation and tests cover core success and failure paths."
+}
