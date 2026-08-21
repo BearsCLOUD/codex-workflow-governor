@@ -1463,12 +1463,15 @@ class LoopWorkflowTests(ExecRunnerTestCase):
         )
 
         discover = workflow["tasks"]["discover"]
+        implement = workflow["tasks"]["implement"]
         self.assertEqual(workflow["loop"]["interval_seconds"], 5)
         self.assertEqual(workflow["loop"]["jitter_seconds"], 0)
         self.assertEqual(discover["sandbox"], "danger-full-access")
         self.assertEqual(discover["write_isolation"], "git-worktree")
         self.assertIn("detached isolated worktree", discover["prompt"])
         self.assertIn("do not require a local branch checkout", discover["prompt"])
+        self.assertEqual(implement["model"], "gpt-5.6-luna")
+        self.assertEqual(implement["reasoning_effort"], "xhigh")
 
     def test_bundled_monitors_validate_install_and_deny_mutations(self) -> None:
         for name in ("loop-monitor", "github-issue-worker"):
