@@ -110,6 +110,14 @@ def classify(prompt: str) -> dict[str, object]:
         "terminal-schema-invalid",
         "terminal-valid-grace",
         "terminal-descendant",
+        "terminal-event-fallback",
+        "terminal-event-malformed",
+        "terminal-event-schema-invalid",
+        "terminal-event-valid-file",
+        "terminal-event-delayed-file",
+        "terminal-event-conflict",
+        "terminal-event-file-malformed",
+        "terminal-event-file-schema-invalid",
         "healthy-events",
     ):
         if prompt.startswith(kind.upper()):
@@ -899,9 +907,55 @@ try:
             print(json.dumps({"type": "item.updated", "index": index}), flush=True)
             time.sleep(0.05)
         output = {"ok": True}
+    elif str(identity["kind"]).startswith("terminal-event-"):
+        final_path = Path(option("--output-last-message"))
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        event_kind = identity["kind"]
+        if event_kind == "terminal-event-malformed":
+            event_text = "{invalid"
+        elif event_kind == "terminal-event-schema-invalid":
+            event_text = json.dumps({"ok": "not-a-boolean"})
+        else:
+            event_text = json.dumps({"ok": True})
+        if event_kind == "terminal-event-fallback":
+            print(json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": json.dumps({"ok": False})},
+            }), flush=True)
+            print(json.dumps({
+                "type": "item.completed",
+                "item": {"type": "message", "text": json.dumps({"ok": False})},
+            }), flush=True)
+        print(json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": event_text},
+        }), flush=True)
+        print(json.dumps({"type": "turn.completed"}), flush=True)
+        if event_kind == "terminal-event-valid-file":
+            time.sleep(0.1)
+            final_path.write_text(json.dumps({"ok": True}), encoding="utf-8")
+        elif event_kind == "terminal-event-delayed-file":
+            time.sleep(0.3)
+            final_path.write_text(json.dumps({"ok": True}), encoding="utf-8")
+        elif event_kind == "terminal-event-conflict":
+            time.sleep(0.1)
+            final_path.write_text(json.dumps({"ok": False}), encoding="utf-8")
+        elif event_kind == "terminal-event-file-malformed":
+            time.sleep(0.1)
+            final_path.write_text("{invalid", encoding="utf-8")
+        elif event_kind == "terminal-event-file-schema-invalid":
+            time.sleep(0.1)
+            final_path.write_text(json.dumps({"ok": "not-a-boolean"}), encoding="utf-8")
+        time.sleep(60)
+        raise SystemExit(0)
     elif str(identity["kind"]).startswith("terminal-"):
         final_path = Path(option("--output-last-message"))
         final_path.parent.mkdir(parents=True, exist_ok=True)
+        if identity["kind"] == "terminal-valid-grace":
+            print(json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": json.dumps({"ok": True})},
+            }), flush=True)
         print(json.dumps({"type": "turn.completed"}), flush=True)
         if identity["kind"] == "terminal-malformed":
             final_path.write_text("{invalid", encoding="utf-8")
@@ -1517,6 +1571,16 @@ class ExecutionTests(ExecRunnerTestCase):
                 "terminal_event_output_schema_invalid",
                 "schema-invalid",
             ),
+            "event-malformed": (
+                "TERMINAL-EVENT-MALFORMED",
+                "terminal_event_output_malformed",
+                "malformed",
+            ),
+            "event-schema": (
+                "TERMINAL-EVENT-SCHEMA-INVALID",
+                "terminal_event_output_schema_invalid",
+                "schema-invalid",
+            ),
         }
         workflow = self.write_workflow(
             "terminal-output-states",
@@ -1575,11 +1639,168 @@ class ExecutionTests(ExecRunnerTestCase):
             state["tasks"]["grace"]["reconciliation_reason"],
             "terminal_event_with_valid_output",
         )
+        self.assertEqual(state["tasks"]["grace"]["reconciliation_source"], "output_file")
         self.assertEqual(state["tasks"]["grace"]["output_validation_state"], "valid")
         self.assertIsNotNone(state["tasks"]["grace"]["output_valid_at"])
         self.assertIsNotNone(state["tasks"]["grace"]["process_exit_at"])
         self.assertIsNone(state["tasks"]["healthy"]["terminal_event_at"])
         self.assertEqual(state["tasks"]["healthy"]["output_validation_state"], "valid")
+        self.assertEqual(state["tasks"]["healthy"]["reconciliation_source"], "output_file")
+
+    def test_terminal_event_agent_message_fallback_survives_delayed_output_file(self) -> None:
+        workflow = self.write_workflow(
+            "terminal-event-fallback",
+            [
+                {
+                    "id": "fallback",
+                    "depends_on": [],
+                    "prompt": "TERMINAL-EVENT-FALLBACK",
+                    "output_schema": "schemas/out.json",
+                },
+                {
+                    "id": "delayed",
+                    "depends_on": [],
+                    "prompt": "TERMINAL-EVENT-DELAYED-FILE",
+                    "output_schema": "schemas/out.json",
+                },
+            ],
+            {"out": OBJECT_SCHEMA},
+        )
+        with patch.dict(os.environ, {"CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS": "0.1"}):
+            code, _, stderr = self.invoke(
+                "run", str(workflow), "--codex-bin", str(self.fake_codex)
+            )
+
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "completed")
+        for task_id in ("fallback", "delayed"):
+            with self.subTest(task=task_id):
+                task = state["tasks"][task_id]
+                self.assertEqual(task["reconciliation_source"], "event_agent_message")
+                self.assertEqual(task["reconciliation_reason"], "terminal_event_with_valid_output")
+                self.assertEqual(
+                    json.loads((run_dir / "tasks" / task_id / "final.json").read_text()),
+                    {"ok": True},
+                )
+                attempt = run_dir / "tasks" / task_id / "attempt-1"
+                self.assertTrue((attempt / ".event-fallback.json").is_file())
+
+    def test_terminal_event_file_remains_authoritative_when_valid(self) -> None:
+        workflow = self.write_workflow(
+            "terminal-event-file",
+            [{
+                "id": "work",
+                "depends_on": [],
+                "prompt": "TERMINAL-EVENT-VALID-FILE",
+                "output_schema": "schemas/out.json",
+            }],
+            {"out": OBJECT_SCHEMA},
+        )
+        with patch.dict(os.environ, {"CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS": "0.4"}):
+            code, _, stderr = self.invoke(
+                "run", str(workflow), "--codex-bin", str(self.fake_codex)
+            )
+
+        self.assertEqual(code, 0, stderr)
+        state = json.loads((self.only_run_dir() / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["tasks"]["work"]["reconciliation_source"], "output_file")
+
+    def test_event_parser_uses_last_agent_message_before_terminal(self) -> None:
+        from workflow_governor import _exec_runner_impl as implementation
+
+        events_path = self.root / "events.jsonl"
+        events_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": json.dumps({"ok": False})},
+                    }),
+                    json.dumps({
+                        "type": "item.completed",
+                        "item": {"type": "message", "text": json.dumps({"ok": False})},
+                    }),
+                    json.dumps({
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": json.dumps({"ok": True})},
+                    }),
+                    json.dumps({"type": "turn.completed"}),
+                    '{"type":"item.completed"',
+                ]
+            ),
+            encoding="utf-8",
+        )
+        state, result, error = implementation._event_output_state(events_path, OBJECT_SCHEMA)
+        self.assertEqual(state, "valid")
+        self.assertEqual(result, {"ok": True})
+        self.assertIsNone(error)
+
+    def test_terminal_event_conflicting_valid_payloads_fail_closed(self) -> None:
+        workflow = self.write_workflow(
+            "terminal-event-conflict",
+            [{
+                "id": "work",
+                "depends_on": [],
+                "prompt": "TERMINAL-EVENT-CONFLICT",
+                "output_schema": "schemas/out.json",
+            }],
+            {"out": OBJECT_SCHEMA},
+        )
+        with patch.dict(os.environ, {"CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS": "0.4"}):
+            code, _, stderr = self.invoke(
+                "run", str(workflow), "--codex-bin", str(self.fake_codex)
+            )
+
+        self.assertEqual(code, 1, stderr)
+        state = json.loads((self.only_run_dir() / "run.json").read_text(encoding="utf-8"))
+        task = state["tasks"]["work"]
+        self.assertEqual(task["failure_reason"], "terminal_event_output_conflict")
+        self.assertEqual(task["reconciliation_reason"], "terminal_event_output_conflict")
+        self.assertEqual(task["output_validation_state"], "conflict")
+        self.assertIsNone(task["reconciliation_source"])
+        self.assertEqual([item["kind"] for item in self.fake_log()["starts"]], ["terminal-event-conflict"])
+
+    def test_invalid_declared_file_is_not_replaced_by_valid_event(self) -> None:
+        modes = {
+            "malformed": (
+                "TERMINAL-EVENT-FILE-MALFORMED",
+                "terminal_event_output_malformed",
+                "malformed",
+            ),
+            "schema": (
+                "TERMINAL-EVENT-FILE-SCHEMA-INVALID",
+                "terminal_event_output_schema_invalid",
+                "schema-invalid",
+            ),
+        }
+        workflow = self.write_workflow(
+            "terminal-event-invalid-file",
+            [
+                {
+                    "id": task_id,
+                    "depends_on": [],
+                    "prompt": prompt,
+                    "output_schema": "schemas/out.json",
+                }
+                for task_id, (prompt, _, _) in modes.items()
+            ],
+            {"out": OBJECT_SCHEMA},
+        )
+        with patch.dict(os.environ, {"CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS": "0.4"}):
+            code, _, stderr = self.invoke(
+                "run", str(workflow), "--codex-bin", str(self.fake_codex)
+            )
+
+        self.assertEqual(code, 1, stderr)
+        state = json.loads((self.only_run_dir() / "run.json").read_text(encoding="utf-8"))
+        for task_id, (_, failure_reason, output_state) in modes.items():
+            with self.subTest(task=task_id):
+                task = state["tasks"][task_id]
+                self.assertEqual(task["failure_reason"], failure_reason)
+                self.assertEqual(task["output_validation_state"], output_state)
+                self.assertIsNone(task["reconciliation_source"])
 
     def test_supervisor_restart_reconciles_running_attempt_without_duplicate_retry(self) -> None:
         workflow = self.write_workflow(
@@ -1649,6 +1870,65 @@ class ExecutionTests(ExecRunnerTestCase):
         self.assertEqual(state["tasks"]["work"]["attempt"], 2)
         starts = self.fake_log()["starts"]
         self.assertEqual([item["kind"] for item in starts], ["terminal-missing"] * 2)
+
+    def test_supervisor_restart_uses_event_fallback_without_retry(self) -> None:
+        workflow = self.write_workflow(
+            "restart-event-fallback",
+            [{
+                "id": "work",
+                "depends_on": [],
+                "prompt": "TERMINAL-EVENT-FALLBACK",
+                "output_schema": "schemas/out.json",
+                "retries": 1,
+            }],
+            {"out": OBJECT_SCHEMA},
+        )
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "skills" / "codex-workflows" / "scripts" / "codex_workflows.py"
+        )
+        environment = os.environ.copy()
+        environment["CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS"] = "0.4"
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                "--project-root",
+                str(self.project),
+                "run",
+                str(workflow),
+                "--codex-bin",
+                str(self.fake_codex),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+        )
+        run_dir: Path | None = None
+        for _ in range(100):
+            run_files = list(self.data.glob("exec-runs/*/*/run.json"))
+            if run_files:
+                candidate = run_files[0].parent
+                attempt_path = candidate / "tasks" / "work" / "attempt-1" / "attempt.json"
+                if attempt_path.is_file():
+                    attempt = json.loads(attempt_path.read_text(encoding="utf-8"))
+                    if attempt.get("terminal_event_at"):
+                        run_dir = candidate
+                        break
+            time.sleep(0.02)
+        self.assertIsNotNone(run_dir)
+        os.kill(worker.pid, signal.SIGKILL)
+        worker.wait(timeout=5)
+
+        with patch.dict(os.environ, {"CODEX_WORKFLOWS_TERMINAL_GRACE_SECONDS": "0.4"}):
+            code, _, stderr = self.invoke("_worker", str(run_dir))
+
+        self.assertEqual(code, 0, stderr)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["tasks"]["work"]["attempt"], 1)
+        self.assertEqual(state["tasks"]["work"]["reconciliation_source"], "event_agent_message")
+        self.assertEqual([item["kind"] for item in self.fake_log()["starts"]], ["terminal-event-fallback"])
 
 
 class WorkflowValidationTests(ExecRunnerTestCase):

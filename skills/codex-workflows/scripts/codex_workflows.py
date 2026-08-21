@@ -2035,6 +2035,201 @@ def _output_state(
     return "valid", result, None
 
 
+def _event_output_state(
+    events_path: Path,
+    schema: Mapping[str, Any],
+) -> tuple[str, Any | None, str | None]:
+    """Validate the final eligible agent message before the first terminal event."""
+    try:
+        text = events_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "missing", None, None
+    lines = text.splitlines()
+    if text and not text.endswith(("\n", "\r")):
+        lines = lines[:-1]
+
+    candidate_found = False
+    candidate_text: Any = None
+    for line in lines:
+        try:
+            event = json.loads(line, parse_constant=_reject_json_constant)
+            _reject_nonfinite(event, str(events_path))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") in TERMINAL_EVENT_TYPES:
+            break
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            continue
+        candidate_found = True
+        candidate_text = item.get("text")
+
+    if not candidate_found:
+        return "missing", None, None
+    if not isinstance(candidate_text, str):
+        return "malformed", None, "item.completed agent_message text must be a string"
+    try:
+        result = json.loads(candidate_text, parse_constant=_reject_json_constant)
+        _reject_nonfinite(result, "event agent_message")
+    except (json.JSONDecodeError, ValueError) as exc:
+        return "malformed", None, str(exc)
+    try:
+        _validate_instance(result, schema)
+    except ContractError as exc:
+        return "schema-invalid", None, str(exc)
+    return "valid", result, None
+
+
+def _atomic_json_if_absent(path: Path, value: Any) -> bool:
+    """Publish a fully fsynced JSON file without replacing a concurrent writer."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _event_fallback_marker(path: Path) -> Path:
+    return path.with_name(".event-fallback.json")
+
+
+def _terminal_output_reconciliation(
+    final_path: Path,
+    events_path: Path,
+    schema: Mapping[str, Any],
+    *,
+    allow_event_fallback: bool,
+) -> dict[str, Any]:
+    """Reconcile terminal output deterministically from file and event evidence."""
+    file_state, file_result, file_error = _output_state(final_path, schema)
+    event_state, event_result, event_error = _event_output_state(events_path, schema)
+    marker_path = _event_fallback_marker(final_path)
+    marker_digest: str | None = None
+    marker_exists = marker_path.is_file()
+    if marker_exists:
+        try:
+            marker = _read_json(marker_path)
+            if (
+                isinstance(marker, dict)
+                and marker.get("source") == "event_agent_message"
+                and isinstance(marker.get("digest"), str)
+            ):
+                marker_digest = marker["digest"]
+        except ContractError:
+            marker_digest = None
+
+    def success(result: Any, source: str) -> dict[str, Any]:
+        return {
+            "status": "valid",
+            "result": result,
+            "output_validation_state": "valid",
+            "output_error": None,
+            "reconciliation_source": source,
+            "failure_reason": None,
+        }
+
+    def failure(state: str, error: str | None, reason: str) -> dict[str, Any]:
+        return {
+            "status": "failed",
+            "result": None,
+            "output_validation_state": state,
+            "output_error": error,
+            "reconciliation_source": None,
+            "failure_reason": reason,
+        }
+
+    if file_state == "valid":
+        if event_state == "valid" and digest_json(file_result) != digest_json(event_result):
+            return failure("conflict", "file and event payloads differ", "terminal_event_output_conflict")
+        source = (
+            "event_agent_message"
+            if event_state == "valid"
+            and marker_digest == digest_json(event_result)
+            else "output_file"
+        )
+        return success(file_result, source)
+
+    # A declared file that exists but is malformed/schema-invalid stays authoritative.
+    if final_path.is_file():
+        return failure(
+            file_state,
+            file_error,
+            _failure_code("terminal_event_output", file_state),
+        )
+
+    if event_state == "valid":
+        if not allow_event_fallback:
+            return {
+                "status": "pending",
+                "result": event_result,
+                "output_validation_state": "missing",
+                "output_error": None,
+                "reconciliation_source": None,
+                "failure_reason": None,
+            }
+        event_digest = digest_json(event_result)
+        marker_created = False
+        if marker_digest is not None and marker_digest != event_digest:
+            return failure("conflict", "event fallback markers differ", "terminal_event_output_conflict")
+        if marker_digest is None:
+            if marker_exists:
+                _atomic_json(
+                    marker_path,
+                    {"source": "event_agent_message", "digest": event_digest},
+                )
+                marker_created = True
+            else:
+                marker_created = _atomic_json_if_absent(
+                    marker_path,
+                    {"source": "event_agent_message", "digest": event_digest},
+                )
+            marker_digest = event_digest if marker_path.is_file() else None
+        created = False
+        if not final_path.is_file():
+            created = _atomic_json_if_absent(final_path, event_result)
+        file_state, file_result, file_error = _output_state(final_path, schema)
+        if file_state == "valid":
+            if digest_json(file_result) != event_digest:
+                return failure("conflict", "file and event payloads differ", "terminal_event_output_conflict")
+            if marker_created and not created:
+                with contextlib.suppress(OSError):
+                    marker_path.unlink()
+                marker_digest = None
+            return success(
+                file_result,
+                "event_agent_message" if marker_digest == event_digest else "output_file",
+            )
+        if final_path.is_file():
+            return failure(
+                file_state,
+                file_error,
+                _failure_code("terminal_event_output", file_state),
+            )
+        return failure("missing", event_error, "terminal_event_output_missing")
+
+    return failure(
+        event_state,
+        event_error,
+        _failure_code("terminal_event_output", event_state),
+    )
+
+
 def _event_timestamp(event: Mapping[str, Any], events_path: Path) -> str:
     for field in ("timestamp", "time", "created_at"):
         value = event.get(field)
@@ -2159,6 +2354,7 @@ def _attempt_status_fields(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "process_exit_at": metadata.get("process_exit_at"),
         "output_valid_at": metadata.get("output_valid_at"),
         "output_validation_state": metadata.get("output_validation_state"),
+        "reconciliation_source": metadata.get("reconciliation_source"),
         "reconciliation_reason": metadata.get("reconciliation_reason"),
         "failure_reason": metadata.get("failure_reason"),
         "next_action": metadata.get("next_action"),
@@ -2232,6 +2428,8 @@ async def _run_one(
                 final_path, task["_schema"]
             )
             if existing_status == "completed" and output_validation_state == "valid":
+                if progress is not None:
+                    await progress(existing)
                 shutil.copy2(final_path, task_dir / "final.json")
                 return True, existing_result, None
             if existing_status in {"failed", "cancelled"}:
@@ -2248,6 +2446,7 @@ async def _run_one(
             if events_changed:
                 await _persist_attempt(attempt_path, metadata, progress)
             terminal_observed = bool(metadata.get("terminal_event_at"))
+            reconciliation: dict[str, Any] | None = None
             if terminal_observed:
                 remaining = max(
                     0.0,
@@ -2255,27 +2454,38 @@ async def _run_one(
                 )
                 deadline = asyncio.get_running_loop().time() + remaining
                 while asyncio.get_running_loop().time() < deadline:
-                    output_validation_state, existing_result, output_error = _output_state(
-                        final_path, task["_schema"]
+                    reconciliation = _terminal_output_reconciliation(
+                        final_path,
+                        events_path,
+                        task["_schema"],
+                        allow_event_fallback=False,
                     )
-                    if output_validation_state == "valid":
+                    if reconciliation["status"] == "valid":
+                        break
+                    if reconciliation.get("failure_reason") == "terminal_event_output_conflict":
                         break
                     metadata["last_worker_heartbeat"] = _precise_utc_now()
-                    metadata["output_validation_state"] = output_validation_state
+                    metadata["output_validation_state"] = reconciliation[
+                        "output_validation_state"
+                    ]
                     await _persist_attempt(attempt_path, metadata, progress)
                     await asyncio.sleep(ATTEMPT_POLL_SECONDS)
+                reconciliation = _terminal_output_reconciliation(
+                    final_path,
+                    events_path,
+                    task["_schema"],
+                    allow_event_fallback=True,
+                )
             killed = await _terminate_recorded_group(metadata)
             metadata["process_exit_at"] = metadata.get("process_exit_at") or _precise_utc_now()
             metadata["orphan_process_group_terminated"] = killed
-            output_validation_state, existing_result, output_error = _output_state(
-                final_path, task["_schema"]
-            )
-            metadata["output_validation_state"] = output_validation_state
-            if output_validation_state == "valid" and terminal_observed:
+            if terminal_observed and reconciliation is not None and reconciliation["status"] == "valid":
                 metadata.update(
                     {
                         "status": "completed",
                         "output_valid_at": _precise_utc_now(),
+                        "output_validation_state": "valid",
+                        "reconciliation_source": reconciliation["reconciliation_source"],
                         "next_action": "complete_task",
                         "finished_at": _precise_utc_now(),
                     }
@@ -2289,25 +2499,43 @@ async def _run_one(
                 if event is not None:
                     await event(
                         "attempt.reconciled",
-                        {"attempt": attempt, "reason": "terminal_event_with_valid_output", "next_action": "complete_task"},
+                        {
+                            "attempt": attempt,
+                            "reason": "terminal_event_with_valid_output",
+                            "reconciliation_source": reconciliation["reconciliation_source"],
+                            "next_action": "complete_task",
+                        },
                     )
-                return True, existing_result, None
+                return True, reconciliation["result"], None
             reconciliation_reason = (
                 "terminal_event_without_valid_output"
                 if terminal_observed
                 else "supervisor_restart_orphaned_process"
             )
-            failure_reason = (
-                _failure_code("terminal_event_output", output_validation_state)
-                if terminal_observed
-                else "supervisor_restart_orphaned_process"
+            if terminal_observed and reconciliation is not None:
+                output_validation_state = reconciliation["output_validation_state"]
+                output_error = reconciliation["output_error"]
+                failure_reason = reconciliation["failure_reason"] or _failure_code(
+                    "terminal_event_output", output_validation_state
+                )
+            else:
+                output_validation_state, _, output_error = _output_state(
+                    final_path, task["_schema"]
+                )
+                failure_reason = "supervisor_restart_orphaned_process"
+            reconciliation_reason = (
+                "terminal_event_output_conflict"
+                if failure_reason == "terminal_event_output_conflict"
+                else reconciliation_reason
             )
             metadata.update(
                 {
                     "status": "failed",
+                    "output_validation_state": output_validation_state,
                     "reconciliation_reason": reconciliation_reason,
                     "failure_reason": failure_reason,
                     "output_error": output_error,
+                    "reconciliation_source": None,
                     "next_action": "retry" if has_retry else "fail_task",
                     "finished_at": _precise_utc_now(),
                 }
@@ -2369,6 +2597,7 @@ async def _run_one(
             "process_exit_at": None,
             "output_valid_at": None,
             "output_validation_state": "missing",
+            "reconciliation_source": None,
             "reconciliation_reason": None,
             "failure_reason": None,
             "next_action": "running",
@@ -2437,7 +2666,23 @@ async def _run_one(
                             )
                             metadata["output_validation_state"] = output_validation_state
 
-                            if terminal_deadline is not None and output_validation_state == "valid":
+                            terminal_reconciliation: dict[str, Any] | None = None
+                            if terminal_deadline is not None:
+                                terminal_reconciliation = _terminal_output_reconciliation(
+                                    final_path,
+                                    events_path,
+                                    task["_schema"],
+                                    allow_event_fallback=False,
+                                )
+                                metadata["output_validation_state"] = terminal_reconciliation[
+                                    "output_validation_state"
+                                ]
+
+                            if (
+                                terminal_reconciliation is not None
+                                and terminal_reconciliation["status"] == "valid"
+                            ):
+                                result = terminal_reconciliation["result"]
                                 await _terminate(process)
                                 if not communicate.done():
                                     communicate.cancel()
@@ -2448,6 +2693,10 @@ async def _run_one(
                                         "status": "completed",
                                         "process_exit_at": _precise_utc_now(),
                                         "output_valid_at": _precise_utc_now(),
+                                        "output_validation_state": "valid",
+                                        "reconciliation_source": terminal_reconciliation[
+                                            "reconciliation_source"
+                                        ],
                                         "reconciliation_reason": "terminal_event_with_valid_output",
                                         "next_action": "complete_task",
                                         "finished_at": _precise_utc_now(),
@@ -2462,11 +2711,18 @@ async def _run_one(
                                 if event is not None:
                                     await event(
                                         "attempt.reconciled",
-                                        {"attempt": attempt, "reason": "terminal_event_with_valid_output", "next_action": "complete_task"},
+                                        {
+                                            "attempt": attempt,
+                                            "reason": "terminal_event_with_valid_output",
+                                            "reconciliation_source": terminal_reconciliation[
+                                                "reconciliation_source"
+                                            ],
+                                            "next_action": "complete_task",
+                                        },
                                     )
                                 return True, result, None
 
-                            if communicate.done():
+                            if communicate.done() and terminal_deadline is None:
                                 with contextlib.suppress(asyncio.CancelledError):
                                     await communicate
                                 metadata["process_exit_at"] = _precise_utc_now()
@@ -2480,6 +2736,7 @@ async def _run_one(
                                         {
                                             "status": "completed",
                                             "output_valid_at": _precise_utc_now(),
+                                            "reconciliation_source": "output_file",
                                             "next_action": "complete_task",
                                             "finished_at": _precise_utc_now(),
                                         }
@@ -2508,6 +2765,7 @@ async def _run_one(
                                         "status": "failed",
                                         "failure_reason": failure_reason,
                                         "output_error": output_error,
+                                        "reconciliation_source": None,
                                         "reconciliation_reason": "process_exit_without_valid_output",
                                         "next_action": "retry" if has_retry else "fail_task",
                                         "finished_at": _precise_utc_now(),
@@ -2517,31 +2775,75 @@ async def _run_one(
                                 break
 
                             if terminal_deadline is not None and now >= terminal_deadline:
+                                terminal_reconciliation = _terminal_output_reconciliation(
+                                    final_path,
+                                    events_path,
+                                    task["_schema"],
+                                    allow_event_fallback=True,
+                                )
                                 await _terminate(process)
                                 if not communicate.done():
                                     communicate.cancel()
                                 with contextlib.suppress(asyncio.CancelledError, OSError):
                                     await communicate
                                 metadata["process_exit_at"] = _precise_utc_now()
-                                output_validation_state, _, output_error = _output_state(
-                                    final_path, task["_schema"]
+                                metadata["output_validation_state"] = terminal_reconciliation[
+                                    "output_validation_state"
+                                ]
+                                if terminal_reconciliation["status"] == "valid":
+                                    metadata.update(
+                                        {
+                                            "status": "completed",
+                                            "output_valid_at": _precise_utc_now(),
+                                            "reconciliation_source": terminal_reconciliation[
+                                                "reconciliation_source"
+                                            ],
+                                            "reconciliation_reason": "terminal_event_with_valid_output",
+                                            "next_action": "complete_task",
+                                            "finished_at": _precise_utc_now(),
+                                        }
+                                    )
+                                    await _persist_attempt(attempt_path, metadata, progress)
+                                    shutil.copy2(final_path, task_dir / "final.json")
+                                    _atomic_json(
+                                        task_dir / "state.json",
+                                        {"status": "completed", "attempt": attempt, "finished_at": utc_now()},
+                                    )
+                                    if event is not None:
+                                        await event(
+                                            "attempt.reconciled",
+                                            {
+                                                "attempt": attempt,
+                                                "reason": "terminal_event_with_valid_output",
+                                                "reconciliation_source": terminal_reconciliation[
+                                                    "reconciliation_source"
+                                                ],
+                                                "next_action": "complete_task",
+                                            },
+                                        )
+                                    return True, terminal_reconciliation["result"], None
+                                failure_reason = terminal_reconciliation["failure_reason"] or _failure_code(
+                                    "terminal_event_output",
+                                    terminal_reconciliation["output_validation_state"],
                                 )
-                                failure_reason = _failure_code(
-                                    "terminal_event_output", output_validation_state
+                                reconciliation_reason = (
+                                    "terminal_event_output_conflict"
+                                    if failure_reason == "terminal_event_output_conflict"
+                                    else "terminal_event_without_valid_output"
                                 )
                                 metadata.update(
                                     {
                                         "status": "failed",
                                         "failure_reason": failure_reason,
-                                        "output_error": output_error,
-                                        "output_validation_state": output_validation_state,
-                                        "reconciliation_reason": "terminal_event_without_valid_output",
+                                        "output_error": terminal_reconciliation["output_error"],
+                                        "reconciliation_source": None,
+                                        "reconciliation_reason": reconciliation_reason,
                                         "next_action": "retry" if has_retry else "fail_task",
                                         "finished_at": _precise_utc_now(),
                                     }
                                 )
                                 last_failure_reason = failure_reason
-                                last_error = output_error or failure_reason
+                                last_error = terminal_reconciliation["output_error"] or failure_reason
                                 break
 
                             if now >= hard_deadline:
@@ -2588,6 +2890,7 @@ async def _run_one(
                     "status": "failed",
                     "failure_reason": "supervisor_error",
                     "error": last_error,
+                    "reconciliation_source": None,
                     "next_action": "retry" if has_retry else "fail_task",
                     "finished_at": _precise_utc_now(),
                 }

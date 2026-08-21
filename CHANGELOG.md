@@ -23,6 +23,13 @@
   environment, revalidate Git/filesystem identity, and do not import or expose
   the legacy lifecycle MCP backend.
 
+### Fixed
+
+- Reconcile schema-valid terminal `agent_message` output from the persisted
+  event stream when `--output-last-message` is delayed, while preserving valid
+  file preference, conflict fail-closed behavior, stable failure codes, and
+  restart-safe process-group cleanup.
+
 ## 0.10.0 — 2026-08-21
 
 ### Changed
