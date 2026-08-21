@@ -1,0 +1,23 @@
+usage: codex-workflows [-h] [--project-root PROJECT_ROOT]
+                       {workflow,agent,plan,run,prompt-plan,prompt-run,prompt-status,prompt-result,prompt-resume,prompt-save-template,_prompt_worker,status,wait,result,cancel,pause,resume,tail,_worker}
+                       ...
+
+Reusable asynchronous DAG runner for ``codex exec`` workflows.
+
+positional arguments:
+  {workflow,agent,plan,run,prompt-plan,prompt-run,prompt-status,prompt-result,prompt-resume,prompt-save-template,_prompt_worker,status,wait,result,cancel,pause,resume,tail,_worker}
+    workflow            Create and manage reusable workflows
+    agent               Manage pinned project-scoped Codex agents
+    plan                Validate inputs and print the deterministic task order
+    run                 Run a workflow
+    prompt-plan         Select a methodology and show a generated first-wave
+                        plan
+    prompt-run          Compile and run bounded adaptive waves from one prompt
+    _prompt_worker      ==SUPPRESS==
+    _worker             ==SUPPRESS==
+
+options:
+  -h, --help            show this help message and exit
+  --project-root PROJECT_ROOT
+                        Repository or project root; defaults to the current
+                        Git root

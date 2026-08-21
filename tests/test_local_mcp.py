@@ -14,8 +14,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from mcp import redaction, root_auth
-from mcp.server import (
+PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "codex-workflows" / "scripts"
+if str(PLUGIN_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_SCRIPTS))
+
+from mcp import redaction, root_auth  # noqa: E402
+from mcp.server import (  # noqa: E402
     DEFAULT_PROTOCOL_VERSION,
     MAX_RESPONSE_BYTES,
     RESULT_SCHEMA,
@@ -23,7 +27,6 @@ from mcp.server import (
     WorkflowMcpServer,
     _sanitize,
 )
-from workflow_governor import exec_runner
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -294,7 +297,7 @@ class LocalMcpTestCase(unittest.TestCase):
         )
         self.assertFalse(run_error, run)
 
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         transaction = implementation._mutation_lookup(self.project, request_id)
         self.assertIsNotNone(transaction)
         self.assertEqual(transaction["operation"], "run")
@@ -388,7 +391,7 @@ class LocalMcpTestCase(unittest.TestCase):
 
         started = next(result for result, is_error in results if not is_error)
         run_id = started["data"]["run_id"]
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         published = [
             path
             for path in implementation._runs_root(self.project).glob("exec_*")
@@ -416,7 +419,7 @@ class LocalMcpTestCase(unittest.TestCase):
             input_values=input_values,
         )
         self.assertEqual(crashed.returncode, 86, crashed.stderr)
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         original = implementation._mutation_lookup(self.project, original_request)
         self.assertEqual(original["phase"], "bound")
         self.assertFalse(
@@ -464,7 +467,7 @@ class LocalMcpTestCase(unittest.TestCase):
         request_id = str(uuid.uuid4())
         crashed = self.direct_run(request_id, failpoint="after-run-prepared")
         self.assertEqual(crashed.returncode, 86, crashed.stderr)
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         transaction = implementation._mutation_lookup(self.project, request_id)
         self.assertEqual(transaction["phase"], "bound")
         reserved_run_id = transaction["run_id"]
@@ -486,7 +489,7 @@ class LocalMcpTestCase(unittest.TestCase):
         request_id = str(uuid.uuid4())
         crashed = self.direct_run(request_id, failpoint="after-request-reserved")
         self.assertEqual(crashed.returncode, 86, crashed.stderr)
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         transaction = implementation._mutation_lookup(self.project, request_id)
         reserved_run_id = transaction["run_id"]
         self.assertEqual(transaction["phase"], "bound")
@@ -512,7 +515,7 @@ class LocalMcpTestCase(unittest.TestCase):
         self.assertEqual(json.loads(recovered.stdout)["run_id"], reserved_run_id)
 
     def test_recorded_and_response_crashes_retry_one_reserved_run(self) -> None:
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         for failpoint in ("after-run-recorded", "before-run-response"):
             with self.subTest(failpoint=failpoint):
                 request_id = str(uuid.uuid4())
@@ -534,7 +537,7 @@ class LocalMcpTestCase(unittest.TestCase):
         first = self.direct_run(request_id, failpoint="after-worker-claim")
         self.assertEqual(first.returncode, 0, first.stderr)
         run_id = json.loads(first.stdout)["run_id"]
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             transaction = implementation._mutation_lookup(self.project, request_id)
@@ -547,7 +550,7 @@ class LocalMcpTestCase(unittest.TestCase):
 
     def test_legacy_split_registry_entries_remain_readable_and_ambiguity_fails_closed(self) -> None:
         server = self.server()
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         for index, schema in enumerate(
             ("codex-workflow-mcp-run-request.v1", "codex-workflow-mcp-control-request.v1")
         ):
@@ -598,7 +601,7 @@ class LocalMcpTestCase(unittest.TestCase):
         self.assertIn("multiple registry entries", ambiguous["error"]["message"])
 
     def test_legacy_request_retry_is_read_only_and_byte_exact(self) -> None:
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         request_id = str(uuid.uuid4())
         normalized = implementation._mcp_normalized_run_request(
             SimpleNamespace(
@@ -641,7 +644,7 @@ class LocalMcpTestCase(unittest.TestCase):
         self.assertIsNone(implementation._mutation_lookup(self.project, request_id))
 
     def test_mcp_status_does_not_rebuild_loop_projection(self) -> None:
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         run_id = "exec_20260821T000000Z_12345678"
         run_dir = implementation._runs_root(self.project) / run_id
         run_dir.mkdir(parents=True, mode=0o700)
@@ -694,7 +697,7 @@ class LocalMcpTestCase(unittest.TestCase):
         self.assertFalse(projection.exists())
 
     def test_unknown_request_status_does_not_create_run_storage(self) -> None:
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         runs_root = implementation._runs_root(self.project)
         self.assertFalse(runs_root.exists())
         status, status_error = self.server().call_tool(
@@ -852,7 +855,7 @@ class LocalMcpTestCase(unittest.TestCase):
             failpoint="after-control-applied",
         )
         self.assertEqual(crashed.returncode, 86, crashed.stderr)
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         self.assertEqual(implementation._mutation_lookup(self.project, resume_id)["phase"], "bound")
 
         resumed, resume_error = server.call_tool(
@@ -904,7 +907,7 @@ class LocalMcpTestCase(unittest.TestCase):
             },
         )
         self.assertFalse(run_error, run)
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         ledger = implementation._mutation_database_path(self.project)
 
         ledger.chmod(0o644)
@@ -926,7 +929,7 @@ class LocalMcpTestCase(unittest.TestCase):
         self.assertIn("one link", hardlinked["error"]["message"])
 
     def test_mutation_ledger_symlink_fails_before_request_persistence(self) -> None:
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         ledger = implementation._mutation_database_path(self.project)
         ledger.parent.mkdir(parents=True, mode=0o700)
         target = self.base / "ledger-target"
@@ -1023,7 +1026,7 @@ class LocalMcpTestCase(unittest.TestCase):
 
         secret = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature\npassword=very secret phrase"
         sanitized = _sanitize(secret)
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         cli_sanitized = implementation._redact_text(secret)
         for value in (sanitized, cli_sanitized):
             self.assertNotIn("eyJhbGci", value)
@@ -1154,9 +1157,9 @@ class LocalMcpTestCase(unittest.TestCase):
 
     def test_direct_cli_process_does_not_import_legacy_package(self) -> None:
         sentinel = self.base / "sentinel"
-        package = sentinel / "workflow_governor"
+        package = sentinel / "workflow_runtime"
         package.mkdir(parents=True)
-        (package / "__init__.py").write_text("raise RuntimeError('legacy imported')\n", encoding="utf-8")
+        (package / "__init__.py").write_text("raise RuntimeError('external runtime imported')\n", encoding="utf-8")
         completed = subprocess.run(
             [
                 sys.executable,
@@ -1181,9 +1184,9 @@ class LocalMcpTestCase(unittest.TestCase):
 
     def test_full_stdio_process_exercises_all_tools_without_legacy_runtime(self) -> None:
         sentinel = self.base / "stdio-sentinel"
-        package = sentinel / "workflow_governor"
+        package = sentinel / "workflow_runtime"
         package.mkdir(parents=True)
-        (package / "__init__.py").write_text("raise RuntimeError('legacy imported')\n", encoding="utf-8")
+        (package / "__init__.py").write_text("raise RuntimeError('external runtime imported')\n", encoding="utf-8")
         binary_dir = self.base / "bin"
         binary_dir.mkdir()
         _fake_codex(binary_dir / "codex")

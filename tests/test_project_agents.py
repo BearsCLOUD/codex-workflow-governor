@@ -5,6 +5,7 @@ import io
 import json
 import os
 import stat
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -12,8 +13,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from workflow_governor.exec_runner import main
-from workflow_governor import _exec_runner_impl as implementation
+PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "codex-workflows" / "scripts"
+if str(PLUGIN_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_SCRIPTS))
+
+from workflow_runtime.engine import main  # noqa: E402
+from workflow_runtime import engine as implementation  # noqa: E402
 
 
 SCHEMA = {

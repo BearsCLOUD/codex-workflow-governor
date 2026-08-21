@@ -15,8 +15,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from workflow_governor.contracts import ContractError
-from workflow_governor.exec_runner import EXEC_WORKFLOW_SCHEMA, execute_run, load_workflow, main
+PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "codex-workflows" / "scripts"
+if str(PLUGIN_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_SCRIPTS))
+
+from workflow_runtime.contracts import ContractError  # noqa: E402
+from workflow_runtime.engine import EXEC_WORKFLOW_SCHEMA, execute_run, load_workflow, main  # noqa: E402
 
 
 FAKE_CODEX = r'''#!/usr/bin/env python3
@@ -1195,7 +1199,7 @@ class ExecutionTests(ExecRunnerTestCase):
             {"worker": OBJECT_SCHEMA},
             inputs={"worker-model": "string", "request": "string"},
         )
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run", str(workflow), "--input", 'worker-model="gpt-5.6-luna"',
                 "--input", 'request="original"',
@@ -1225,7 +1229,7 @@ class ExecutionTests(ExecRunnerTestCase):
             {"worker": OBJECT_SCHEMA},
             inputs={"worker-model": "string"},
         )
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run", str(workflow), "--input", 'worker-model="gpt-5.6-luna"',
                 "--codex-bin", str(self.fake_codex), "--detach",
@@ -1400,7 +1404,7 @@ class ExecutionTests(ExecRunnerTestCase):
             {"out": OBJECT_SCHEMA},
         )
 
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run",
                 str(workflow),
@@ -1475,7 +1479,7 @@ class ExecutionTests(ExecRunnerTestCase):
             ],
             {"out": FANOUT_SCHEMA},
         )
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run",
                 str(workflow),
@@ -1708,7 +1712,7 @@ class ExecutionTests(ExecRunnerTestCase):
         self.assertEqual(state["tasks"]["work"]["reconciliation_source"], "output_file")
 
     def test_event_parser_uses_last_agent_message_before_terminal(self) -> None:
-        from workflow_governor import _exec_runner_impl as implementation
+        from workflow_runtime import engine as implementation
 
         events_path = self.root / "events.jsonl"
         events_path.write_text(
@@ -2370,7 +2374,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
 
     def test_semantic_failure_preserves_checkpoint_and_opens_keyed_circuit(self) -> None:
         workflow = self.outcome_workflow("outcome-run")
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run",
                 str(workflow),
@@ -2382,7 +2386,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             )
         self.assertEqual(code, 0, stderr)
         run_dir = self.only_run_dir()
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
 
         async def fake_cycle(cycle_dir: Path) -> int:
             state = json.loads((cycle_dir / "run.json").read_text(encoding="utf-8"))
@@ -2404,8 +2408,8 @@ class LoopWorkflowTests(ExecRunnerTestCase):
         async def keep_running(_target: Path, _wake_at: object) -> str:
             return "running"
 
-        with patch("workflow_governor._exec_runner_impl._execute_run", new=fake_cycle), patch(
-            "workflow_governor._exec_runner_impl._wait_for_loop_wake", new=keep_running
+        with patch("workflow_runtime.engine._execute_run", new=fake_cycle), patch(
+            "workflow_runtime.engine._wait_for_loop_wake", new=keep_running
         ):
             self.assertEqual(asyncio.run(execute_run(run_dir)), 1)
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -2808,7 +2812,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             {"sandbox": "workspace-write", "write_isolation": "git-worktree"}
         )
         (workflow / "workflow.json").write_text(json.dumps(raw), encoding="utf-8")
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run",
                 str(workflow),
@@ -2823,7 +2827,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             )
         self.assertEqual(code, 0, stderr)
         run_dir = self.only_run_dir()
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
 
         async def pause_after_cycle(target: Path, _wake_at: object) -> str:
             implementation._atomic_json(
@@ -2833,7 +2837,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             return "paused"
 
         with patch(
-            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            "workflow_runtime.engine._wait_for_loop_wake",
             new=pause_after_cycle,
         ):
             self.assertEqual(asyncio.run(execute_run(run_dir)), 0)
@@ -2852,7 +2856,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
         self.assertTrue(any("Allowed external mutations: none" in value for value in instructions))
 
     def test_github_issue_worker_fixture_triages_update_exactly_once(self) -> None:
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run",
                 "builtin:github-issue-worker",
@@ -2868,7 +2872,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             )
         self.assertEqual(code, 0, stderr)
         run_dir = self.only_run_dir()
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         waits = 0
 
         async def two_cycles_then_pause(target: Path, _wake_at: object) -> str:
@@ -2883,7 +2887,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             return "running"
 
         with patch(
-            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            "workflow_runtime.engine._wait_for_loop_wake",
             new=two_cycles_then_pause,
         ):
             self.assertEqual(asyncio.run(execute_run(run_dir)), 0)
@@ -2909,7 +2913,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
         (workflow / "workflow.json").write_text(
             json.dumps(raw_workflow), encoding="utf-8"
         )
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run",
                 str(workflow),
@@ -2923,7 +2927,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             )
         self.assertEqual(code, 0, stderr)
         run_dir = self.only_run_dir()
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
         waits = 0
 
         async def two_cycles_then_pause(target: Path, _wake_at: object) -> str:
@@ -2938,7 +2942,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             return "running"
 
         with patch(
-            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            "workflow_runtime.engine._wait_for_loop_wake",
             new=two_cycles_then_pause,
         ):
             worker_code = asyncio.run(execute_run(run_dir))
@@ -3059,7 +3063,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
 
     def test_partial_cycle_failure_reuses_item_and_opens_circuit(self) -> None:
         workflow = self.write_loop("loop-circuit", failing_tail=True, max_failures=2)
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run",
                 str(workflow),
@@ -3078,7 +3082,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             return "running"
 
         with patch(
-            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            "workflow_runtime.engine._wait_for_loop_wake",
             new=immediate,
         ):
             worker_code = asyncio.run(execute_run(run_dir))
@@ -3110,7 +3114,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             inputs={"cursor": "string", "source": "string"},
             loop=loop,
         )
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run",
                 str(workflow),
@@ -3140,7 +3144,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
 
     def test_interrupted_supervisor_resumes_from_committed_cursor(self) -> None:
         workflow = self.write_loop("loop-restart")
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             code, _, stderr = self.invoke(
                 "run",
                 str(workflow),
@@ -3173,10 +3177,10 @@ class LoopWorkflowTests(ExecRunnerTestCase):
         self.assertEqual(interrupted["status"], "failed")
         self.assertEqual(interrupted["checkpoint"]["cursor"], "1")
 
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             resume_code, _, resume_stderr = self.invoke("resume", interrupted["run_id"])
         self.assertEqual(resume_code, 0, resume_stderr)
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
 
         async def pause_after_cycle(target: Path, _wake_at: object) -> str:
             implementation._atomic_json(
@@ -3186,7 +3190,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             return "paused"
 
         with patch(
-            "workflow_governor._exec_runner_impl._wait_for_loop_wake",
+            "workflow_runtime.engine._wait_for_loop_wake",
             new=pause_after_cycle,
         ):
             self.assertEqual(asyncio.run(execute_run(run_dir)), 0)
@@ -3211,7 +3215,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             str(self.fake_codex),
             "--detach",
         )
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             first_code, _, first_stderr = self.invoke(*arguments)
             second_code, _, second_stderr = self.invoke(*arguments)
         self.assertEqual(first_code, 0, first_stderr)
@@ -3222,7 +3226,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
 
         pause_code, _, pause_stderr = self.invoke("pause", run_id)
         self.assertEqual(pause_code, 0, pause_stderr)
-        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+        with patch("workflow_runtime.engine.subprocess.Popen"):
             resume_code, _, resume_stderr = self.invoke("resume", run_id)
             duplicate_resume_code, _, duplicate_resume_stderr = self.invoke(
                 "resume", run_id
@@ -3455,7 +3459,7 @@ class PromptWorkflowTests(ExecRunnerTestCase):
             *self.prompt_arguments("SELECT-ADAPTIVE TWO-WAVES restart"),
         )
         self.assertEqual(plan_code, 0, plan_stderr)
-        with patch("workflow_governor._prompt_workflows_impl._spawn_worker"):
+        with patch("workflow_runtime.prompt._spawn_worker"):
             code, stdout, stderr = self.invoke(
                 "prompt-run",
                 *self.prompt_arguments("SELECT-ADAPTIVE TWO-WAVES restart"),
@@ -3464,8 +3468,8 @@ class PromptWorkflowTests(ExecRunnerTestCase):
         self.assertEqual(code, 0, stderr)
         run_id = stdout.strip()
         run_dir = self.only_prompt_run_dir()
-        implementation = sys.modules["workflow_governor._exec_runner_impl"]
-        prompt_module = sys.modules["workflow_governor._prompt_workflows_impl"]
+        implementation = sys.modules["workflow_runtime.engine"]
+        prompt_module = sys.modules["workflow_runtime.prompt"]
         original_compile = prompt_module._compile_wave
 
         def interrupt_before_second_wave(*arguments: object, **keywords: object):
@@ -3483,7 +3487,7 @@ class PromptWorkflowTests(ExecRunnerTestCase):
         self.assertEqual(interrupted["current_wave"], 2)
         calls_after_first = len(self.fake_log()["starts"])
 
-        with patch("workflow_governor._prompt_workflows_impl._spawn_worker"):
+        with patch("workflow_runtime.prompt._spawn_worker"):
             resume_code, _, resume_stderr = self.invoke("prompt-resume", run_id)
         self.assertEqual(resume_code, 0, resume_stderr)
         self.assertEqual(

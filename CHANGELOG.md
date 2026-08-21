@@ -13,6 +13,19 @@
 - Unified run and control mutation identities in one CLI-owned SQLite ledger
   and retained read-only compatibility for legacy split-registry entries.
 
+### Changed
+
+- Consolidated the skill runtime behind one stable `workflow_runtime` boundary,
+  preserving CLI, workflow artifact, loop, prompt, agent, and MCP wire
+  contracts while keeping the root launchers thin.
+- Added contract/golden snapshots for launcher help, workflow show/plan, MCP
+  `tools/list`, and terminal status/result shapes.
+
+### Removed
+
+- Removed the historical lifecycle backend and obsolete compile/MCP wrapper
+  scripts; all execution now goes through the self-contained skill CLI.
+
 ### Security
 
 - MCP responses are closed, bounded, and omit prompts, inputs, output bodies,

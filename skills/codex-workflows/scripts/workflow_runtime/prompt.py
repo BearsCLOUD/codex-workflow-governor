@@ -215,7 +215,11 @@ def _parse_duration(value: str, runtime: Any) -> int:
 
 
 def _plugin_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    current = Path(__file__).resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".codex-plugin" / "plugin.json").is_file():
+            return candidate
+    raise RuntimeError("codex-workflow-governor plugin root could not be resolved")
 
 
 def _methodology_pins(runtime: Any, snapshot_root: Path | None = None) -> dict[str, Any]:
@@ -732,8 +736,8 @@ def _write_state_markdown(run_dir: Path, state: Mapping[str, Any], runtime: Any)
             "",
             "## Commands",
             "",
-            f"- Status: `python3 \"{Path(runtime.__file__).resolve()}\" --project-root \"{state['project_root']}\" prompt-status {state['run_id']}`",
-            f"- Result: `python3 \"{Path(runtime.__file__).resolve()}\" --project-root \"{state['project_root']}\" prompt-result {state['run_id']}`",
+            f"- Status: `python3 \"{runtime._launcher_path()}\" --project-root \"{state['project_root']}\" prompt-status {state['run_id']}`",
+            f"- Result: `python3 \"{runtime._launcher_path()}\" --project-root \"{state['project_root']}\" prompt-result {state['run_id']}`",
             "",
         ]
     )
@@ -1514,7 +1518,7 @@ def _spawn_worker(run_dir: Path, project: Path, runtime: Any) -> None:
         subprocess.Popen(
             [
                 sys.executable,
-                str(Path(runtime.__file__).resolve()),
+                str(runtime._launcher_path()),
                 "--project-root",
                 str(project),
                 "_prompt_worker",

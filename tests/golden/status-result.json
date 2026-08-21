@@ -1,0 +1,21 @@
+{
+  "status": {
+    "run_id": "exec_20260101T000000Z_00000000",
+    "status": "completed",
+    "workflow_id": "fanout-synthesize",
+    "workflow_digest": "f0d175f183f6817348ab4e703c22c86786c712c977a3b58a90e4b3d0208144e6",
+    "tasks": {
+      "analyze-items": {"status": "completed"},
+      "synthesize": {"status": "completed"}
+    }
+  },
+  "result": {
+    "run_id": "exec_20260101T000000Z_00000000",
+    "status": "completed",
+    "workflow_id": "fanout-synthesize",
+    "tasks": {
+      "analyze-items": {"status": "completed"},
+      "synthesize": {"status": "completed"}
+    }
+  }
+}

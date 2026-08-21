@@ -1,0 +1,51 @@
+{
+  "workflow_id": "fanout-synthesize",
+  "scope": "builtin",
+  "workflow_digest": "f0d175f183f6817348ab4e703c22c86786c712c977a3b58a90e4b3d0208144e6",
+  "max_parallel": 8,
+  "max_calls": 5000,
+  "planned_calls": 6,
+  "loop": null,
+  "tasks": [
+    {
+      "id": "analyze-items",
+      "depends_on": [],
+      "foreach": "inputs.items",
+      "fanout_items": 2,
+      "max_items": 100,
+      "planned_calls": 4,
+      "sandbox": "read-only",
+      "cwd": ".",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "high",
+      "agent": null,
+      "agent_sha256": null,
+      "idempotency_key": null,
+      "write_isolation": null,
+      "resolved_agent": null,
+      "timeout_seconds": 1800,
+      "retries": 1
+    },
+    {
+      "id": "synthesize",
+      "depends_on": [
+        "analyze-items"
+      ],
+      "foreach": null,
+      "fanout_items": null,
+      "max_items": null,
+      "planned_calls": 2,
+      "sandbox": "read-only",
+      "cwd": ".",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "high",
+      "agent": null,
+      "agent_sha256": null,
+      "idempotency_key": null,
+      "write_isolation": null,
+      "resolved_agent": null,
+      "timeout_seconds": 1800,
+      "retries": 1
+    }
+  ]
+}

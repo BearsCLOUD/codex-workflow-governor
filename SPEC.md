@@ -42,15 +42,18 @@ call-budget, and worktree gates.
 ```text
 Codex MCP client
   -> plugin .mcp.json
-  -> mcp/server.py (validation, authorization, bounded envelopes)
+  -> mcp/server.py (stable facade)
+  -> mcp/runtime.py (protocol, authorization, bounded envelopes, CLI bridge)
   -> scripts/codex_workflows.py (fixed package-relative launcher)
   -> skills/codex-workflows/scripts/codex_workflows.py
+  -> skills/codex-workflows/scripts/workflow_runtime/
+     (contracts, storage, resolution, execution, supervision, loops, prompts, agents)
   -> detached supervisor
   -> codex exec workers
 ```
 
-The MCP server never imports `workflow_governor` lifecycle modules. The public
-skill CLI owns its small contract helpers directly and exposes internal MCP JSON
+The MCP server never imports a separate lifecycle backend. The public skill
+CLI owns its small contract helpers directly and exposes internal MCP JSON
 modes for qualified-only resolution, non-writing status, correlated mutations,
 and lifecycle acknowledgement.
 
