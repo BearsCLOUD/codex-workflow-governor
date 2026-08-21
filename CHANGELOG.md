@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added one plugin-registered local stdio MCP adapter with typed plan, detached
+  run, bounded status, and explicit lifecycle-control tools over the public
+  `codex exec` workflow CLI.
+- Added an out-of-band private Git-root authorization helper, caller-owned
+  mutation identities, qualified-only workflow resolution, and detached
+  supervisor recovery owned by the CLI.
+- Unified run and control mutation identities in one CLI-owned SQLite ledger
+  and retained read-only compatibility for legacy split-registry entries.
+
+### Security
+
+- MCP responses are closed, bounded, and omit prompts, inputs, output bodies,
+  credentials, usernames, and absolute artifact paths.
+- JSON-RPC IDs and complete responses are bounded, and the CLI plus adapter use
+  one shared redactor for credential-named values and common token formats.
+- Production MCP children pin package-relative executables, use an allowlisted
+  environment, revalidate Git/filesystem identity, and do not import or expose
+  the legacy lifecycle MCP backend.
+
 ## 0.10.0 — 2026-08-21
 
 ### Changed

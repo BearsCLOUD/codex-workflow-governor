@@ -12,6 +12,45 @@ The implementation uses only the Python standard library. It does not require th
 
 The async runner reuses the CLI login. It does not require a separate API key.
 
+## Local MCP tools
+
+The plugin registers one optional local stdio MCP server. It exposes exactly four
+typed tools over the same workflow CLI and `codex exec` backend:
+
+- `workflow_plan` validates and returns a bounded deterministic plan;
+- `workflow_run` starts a detached run under a caller-generated UUIDv4;
+- `workflow_status` returns a redacted persisted summary by run or request ID;
+- `workflow_control` explicitly requests `pause`, `resume`, or `cancel`.
+
+MCP is an interface, not another runner. There is no HTTP listener, hosted state,
+OAuth flow, custom UI, telemetry, or background upload.
+
+Before MCP may use a project, authorize its exact canonical Git worktree through
+the separate local helper:
+
+```bash
+python3 scripts/workflow_mcp_roots.py authorize /absolute/git/worktree
+python3 scripts/workflow_mcp_roots.py list
+python3 scripts/workflow_mcp_roots.py revoke /absolute/git/worktree
+```
+
+The private registry is stored below `$CODEX_HOME/workflow-governor-mcp/`.
+Authorization records filesystem/Git identities and a credential-free origin
+digest; it does not store source, prompts, inputs, outputs, or credentials. MCP
+tools cannot add or revoke roots. A moved, replaced, symlink-aliased, tampered,
+or unregistered worktree fails closed. Canonical Git linked worktrees are
+supported and must be authorized independently.
+
+Run and control tools require the caller to supply a new UUIDv4 `request_id`.
+Retain it: after a lost response or timeout, call `workflow_status` with that
+request ID before retrying. Reusing the same ID with different arguments is an
+error; an identical retry resolves to the existing mutation. The ID is unique
+across both run and control operations. The CLI supervisor owns one private
+project-local SQLite mutation ledger; MCP does not maintain a second state
+machine. Legacy `.mcp-requests`, `.mcp-run-requests`, and
+`.mcp-control-requests` entries remain readable and are never rewritten or
+removed automatically.
+
 ## Asynchronous Codex workflows
 
 The self-contained CLI lives inside the `codex-workflows` skill:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -15,55 +16,62 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
-try:
-    from workflow_governor.contracts import ContractError, digest_json, validate_typed_values
-except ModuleNotFoundError:
-    import hashlib
+class ContractError(ValueError):
+    """Raised when a standalone executable-workflow contract is invalid."""
 
-    class ContractError(ValueError):
-        """Raised when a standalone executable-workflow contract is invalid."""
+    def __init__(self, path: str, message: str) -> None:
+        super().__init__(f"{path}: {message}")
+        self.path = path
+        self.message = message
 
-        def __init__(self, path: str, message: str) -> None:
-            super().__init__(f"{path}: {message}")
-            self.path = path
-            self.message = message
 
-    def digest_json(value: Any) -> str:
-        payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+def digest_json(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def validate_typed_values(values: Any, specification: Mapping[str, str], path: str) -> dict[str, Any]:
-        if not isinstance(values, dict):
-            raise ContractError(path, "must be an object")
-        if set(values) != set(specification):
-            missing = sorted(set(specification) - set(values))
-            unknown = sorted(set(values) - set(specification))
-            details = []
-            if missing:
-                details.append(f"missing: {', '.join(missing)}")
-            if unknown:
-                details.append(f"unknown: {', '.join(unknown)}")
-            raise ContractError(path, "; ".join(details))
-        python_types: dict[str, tuple[type, ...]] = {
-            "string": (str,), "integer": (int,), "number": (int, float), "boolean": (bool,),
-            "object": (dict,), "array": (list,), "null": (type(None),),
-        }
-        for name, expected in specification.items():
-            current = values[name]
-            if expected in {"integer", "number"} and isinstance(current, bool):
-                raise ContractError(f"{path}.{name}", f"must be {expected}")
-            if not isinstance(current, python_types[expected]):
-                raise ContractError(f"{path}.{name}", f"must be {expected}")
-        return values
+
+def validate_typed_values(values: Any, specification: Mapping[str, str], path: str) -> dict[str, Any]:
+    if not isinstance(values, dict):
+        raise ContractError(path, "must be an object")
+    if set(values) != set(specification):
+        missing = sorted(set(specification) - set(values))
+        unknown = sorted(set(values) - set(specification))
+        details = []
+        if missing:
+            details.append(f"missing: {', '.join(missing)}")
+        if unknown:
+            details.append(f"unknown: {', '.join(unknown)}")
+        raise ContractError(path, "; ".join(details))
+    python_types: dict[str, tuple[type, ...]] = {
+        "string": (str,), "integer": (int,), "number": (int, float), "boolean": (bool,),
+        "object": (dict,), "array": (list,), "null": (type(None),),
+    }
+    for name, expected in specification.items():
+        current = values[name]
+        if expected in {"integer", "number"} and isinstance(current, bool):
+            raise ContractError(f"{path}.{name}", f"must be {expected}")
+        if not isinstance(current, python_types[expected]):
+            raise ContractError(f"{path}.{name}", f"must be {expected}")
+    return values
+
+
+# The tracked package facade is a test/backward-compatibility import surface.
+# Direct CLI and MCP subprocesses never take this branch and therefore remain
+# independent of the legacy package.
+if __name__ == "workflow_governor._exec_runner_impl":
+    from workflow_governor.contracts import ContractError as ContractError
 
 
 EXEC_WORKFLOW_SCHEMA_V1 = "codex-exec-workflow.v1"
@@ -72,6 +80,7 @@ EXEC_WORKFLOW_SCHEMA = EXEC_WORKFLOW_SCHEMA_V1
 EXEC_WORKFLOW_SCHEMAS = {EXEC_WORKFLOW_SCHEMA_V1, EXEC_WORKFLOW_SCHEMA_V2}
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 RUN_IDENTIFIER = re.compile(r"^exec_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
+QUALIFIED_WORKFLOW = re.compile(r"^(project|user|builtin):([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$")
 PLACEHOLDER = re.compile(r"{{\s*([^{}]+?)\s*}}")
 TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled"}
 TERMINAL_TASK_STATUSES = {"completed", "failed", "blocked", "cancelled"}
@@ -208,6 +217,336 @@ def _runs_root(project: Path) -> Path:
     return _contained(root, root / "exec-runs" / project_key, "run storage")
 
 
+def _mcp_root_auth_module():
+    module_name = "_codex_workflow_mcp_root_auth"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    module_path = Path(__file__).resolve().parents[3] / "mcp" / "root_auth.py"
+    specification = importlib.util.spec_from_file_location(module_name, module_path)
+    if specification is None or specification.loader is None:
+        raise ContractError("MCP root identity", f"cannot load {module_path}")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[module_name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+def _mcp_redaction_module():
+    module_name = "_codex_workflow_mcp_redaction"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    module_path = Path(__file__).resolve().parents[3] / "mcp" / "redaction.py"
+    specification = importlib.util.spec_from_file_location(module_name, module_path)
+    if specification is None or specification.loader is None:
+        raise ContractError("MCP redaction", "shared redaction module could not be loaded")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[module_name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+def _verify_mcp_root_identity(project: Path, expected: str | None) -> None:
+    if expected is None:
+        return
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ContractError("MCP root identity", "expected digest must be lower-case SHA-256")
+    module = _mcp_root_auth_module()
+    try:
+        current = module.identity_digest(module.project_identity(project))
+    except Exception as exc:
+        raise ContractError("MCP root identity", str(exc)) from exc
+    if current != expected:
+        raise ContractError("MCP root identity", "authorized project identity has drifted")
+
+
+def _mcp_uuid(value: str | None, label: str = "request_id") -> str:
+    if not isinstance(value, str):
+        raise ContractError(label, "is required for MCP mutations")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as exc:
+        raise ContractError(label, "must be a UUIDv4") from exc
+    if parsed.version != 4 or parsed.int == 0 or str(parsed) != value.lower():
+        raise ContractError(label, "must be a canonical lower-case UUIDv4")
+    return value
+
+
+MUTATION_REQUEST_FIELDS = (
+    "request_id",
+    "operation",
+    "request_digest",
+    "run_id",
+    "run_kind",
+    "action",
+    "desired_status",
+    "phase",
+    "worker_pid",
+    "worker_start_identity",
+    "error",
+    "created_at",
+    "updated_at",
+    "acknowledged_at",
+)
+MUTATION_REQUEST_UPDATABLE = set(MUTATION_REQUEST_FIELDS) - {
+    "request_id",
+    "operation",
+    "request_digest",
+    "created_at",
+}
+
+
+def _mutation_database_path(project: Path) -> Path:
+    return _runs_root(project) / "mutation-ledger.sqlite3"
+
+
+def _verify_private_mutation_database(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ContractError("mutation ledger", str(exc)) from exc
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise ContractError("mutation ledger", "must be a regular file, not a symlink")
+    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1:
+        raise ContractError("mutation ledger", "must be owned by the current user with mode 0600 and one link")
+
+
+def _ensure_private_mutation_database(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        descriptor = None
+    if descriptor is not None:
+        os.close(descriptor)
+    _verify_private_mutation_database(path)
+
+
+@contextlib.contextmanager
+def _mutation_database(project: Path):
+    path = _mutation_database_path(project)
+    _ensure_private_mutation_database(path)
+    try:
+        connection = sqlite3.connect(path, timeout=5.0, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA journal_mode = DELETE")
+        connection.execute("PRAGMA synchronous = FULL")
+        connection.execute("PRAGMA trusted_schema = OFF")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mutation_requests (
+                request_id TEXT PRIMARY KEY,
+                operation TEXT NOT NULL CHECK (operation IN ('run', 'control')),
+                request_digest TEXT NOT NULL,
+                run_id TEXT,
+                run_kind TEXT,
+                action TEXT,
+                desired_status TEXT,
+                phase TEXT NOT NULL,
+                worker_pid INTEGER,
+                worker_start_identity TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                acknowledged_at TEXT
+            ) STRICT
+            """
+        )
+    except sqlite3.Error as exc:
+        raise ContractError("mutation ledger", str(exc)) from exc
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+@contextlib.contextmanager
+def _mutation_database_readonly(project: Path):
+    path = _mutation_database_path(project)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        yield None
+        return
+    _verify_private_mutation_database(path)
+    try:
+        connection = sqlite3.connect(
+            f"{path.as_uri()}?mode=ro",
+            timeout=5.0,
+            isolation_level=None,
+            uri=True,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA trusted_schema = OFF")
+    except sqlite3.Error as exc:
+        raise ContractError("mutation ledger", str(exc)) from exc
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+def _mutation_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {field: row[field] for field in MUTATION_REQUEST_FIELDS}
+
+
+def _mcp_legacy_request_paths(project: Path, request_id: str) -> tuple[Path, Path, Path]:
+    name = f"{hashlib.sha256(request_id.encode('utf-8')).hexdigest()}.json"
+    root = _runs_root(project)
+    return (
+        root / ".mcp-requests" / name,
+        root / ".mcp-run-requests" / name,
+        root / ".mcp-control-requests" / name,
+    )
+
+
+def _mcp_request_operation(transaction: Mapping[str, Any]) -> str:
+    operation = transaction.get("operation")
+    if operation in {"run", "control"}:
+        return str(operation)
+    legacy_schema = transaction.get("schema_version")
+    if legacy_schema == "codex-workflow-mcp-run-request.v1":
+        return "run"
+    if legacy_schema == "codex-workflow-mcp-control-request.v1":
+        return "control"
+    raise ContractError("MCP request", "request registry entry has an unknown operation")
+
+
+def _legacy_registered_request(project: Path, request_id: str) -> tuple[Path | None, dict[str, Any] | None]:
+    matches = [path for path in _mcp_legacy_request_paths(project, request_id) if path.is_file()]
+    if len(matches) > 1:
+        raise ContractError("MCP request", "request_id has multiple registry entries")
+    if not matches:
+        return None, None
+    path = matches[0]
+    transaction = _read_json(path)
+    if not isinstance(transaction, dict) or transaction.get("request_id") != request_id:
+        raise ContractError("MCP request", "request registry entry is corrupt")
+    _mcp_request_operation(transaction)
+    return path, transaction
+
+
+def _mutation_lookup(project: Path, request_id: str) -> dict[str, Any] | None:
+    with _mutation_database_readonly(project) as connection:
+        if connection is None:
+            return None
+        row = connection.execute(
+            "SELECT * FROM mutation_requests WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+    return _mutation_row(row) if row is not None else None
+
+
+def _registered_request(project: Path, request_id: str) -> tuple[dict[str, Any] | None, bool]:
+    database = _mutation_lookup(project, request_id)
+    _, legacy = _legacy_registered_request(project, request_id)
+    if database is not None and legacy is not None:
+        raise ContractError("MCP request", "request_id exists in both current and legacy registries")
+    return (database, False) if database is not None else (legacy, legacy is not None)
+
+
+def _reserve_mutation_request(
+    project: Path,
+    *,
+    request_id: str,
+    operation: str,
+    request_digest: str,
+    run_id: str,
+    run_kind: str | None = None,
+    action: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    _, legacy = _legacy_registered_request(project, request_id)
+    if legacy is not None:
+        if _mutation_lookup(project, request_id) is not None:
+            raise ContractError("MCP request", "request_id exists in both current and legacy registries")
+        return legacy, True
+    now = _precise_utc_now()
+    try:
+        with _mutation_database(project) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM mutation_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO mutation_requests (
+                        request_id, operation, request_digest, run_id, run_kind,
+                        action, phase, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'bound', ?, ?)
+                    """,
+                    (request_id, operation, request_digest, run_id, run_kind, action, now, now),
+                )
+                row = connection.execute(
+                    "SELECT * FROM mutation_requests WHERE request_id = ?",
+                    (request_id,),
+                ).fetchone()
+            connection.execute("COMMIT")
+    except sqlite3.Error as exc:
+        raise ContractError("mutation ledger", str(exc)) from exc
+    if row is None:
+        raise ContractError("mutation ledger", "failed to reserve request")
+    return _mutation_row(row), False
+
+
+def _update_mutation_request(project: Path, request_id: str, **changes: Any) -> dict[str, Any]:
+    unknown = set(changes) - MUTATION_REQUEST_UPDATABLE
+    if unknown:
+        raise ContractError("mutation ledger", f"unsupported fields: {', '.join(sorted(unknown))}")
+    values = {**changes, "updated_at": _precise_utc_now()}
+    assignments = ", ".join(f"{field} = ?" for field in values)
+    try:
+        with _mutation_database(project) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"UPDATE mutation_requests SET {assignments} WHERE request_id = ?",
+                (*values.values(), request_id),
+            )
+            if cursor.rowcount != 1:
+                connection.execute("ROLLBACK")
+                raise ContractError("request_id", "unknown mutation request")
+            row = connection.execute(
+                "SELECT * FROM mutation_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            connection.execute("COMMIT")
+    except sqlite3.Error as exc:
+        raise ContractError("mutation ledger", str(exc)) from exc
+    if row is None:
+        raise ContractError("mutation ledger", "request disappeared during update")
+    return _mutation_row(row)
+
+
+def _mcp_test_failpoint(name: str) -> None:
+    if os.environ.get("CODEX_WORKFLOWS_MCP_TEST_FAILPOINT") == name:
+        os._exit(86)
+
+
+def _mcp_normalized_run_request(args: argparse.Namespace, project: Path) -> dict[str, Any]:
+    inputs = _parse_input_values(args.inputs, args.input)
+    scope, path = resolve_workflow(args.workflow, project, qualified_only=True)
+    workflow = load_workflow(path, project)
+    validate_typed_values(inputs, workflow["inputs"], "inputs")
+    return {
+        "workflow": f"{scope}:{workflow['workflow_id']}",
+        "workflow_digest": _workflow_digest(workflow),
+        "inputs_digest": digest_json(inputs),
+        "max_parallel": args.max_parallel,
+        "max_calls": args.max_calls,
+        "allow_workspace_write": bool(args.allow_workspace_write),
+        "allow_danger_full_access": bool(args.allow_danger_full_access),
+    }
+
+
+def _mcp_process_is_live(pid: Any, identity: Any) -> bool:
+    return isinstance(pid, int) and isinstance(identity, str) and _process_start_identity(pid) == identity
+
+
 def _contained(root: Path, candidate: Path, label: str) -> Path:
     resolved_root = root.expanduser().resolve()
     resolved_candidate = candidate.expanduser().resolve(strict=False)
@@ -312,7 +651,19 @@ def _workflow_file(path: Path) -> Path:
     return path / "workflow.json" if path.is_dir() else path
 
 
-def resolve_workflow(reference: str, project: Path) -> tuple[str, Path]:
+def resolve_workflow(reference: str, project: Path, *, qualified_only: bool = False) -> tuple[str, Path]:
+    if qualified_only:
+        match = QUALIFIED_WORKFLOW.fullmatch(reference)
+        if match is None:
+            raise ContractError("workflow", "MCP requires a qualified project:, user:, or builtin: reference")
+        scope, name = match.groups()
+        root = _scope_root(scope, project)
+        lexical_path = root / name / "workflow.json"
+        _reject_symlink_alias(root, lexical_path, f"{scope} workflow")
+        path = _contained(root, lexical_path, f"{scope} workflow")
+        if not path.is_file():
+            raise ContractError("workflow", f"unknown workflow {reference!r}")
+        return scope, path
     direct = Path(reference).expanduser()
     if direct.exists():
         path = _workflow_file(direct.resolve())
@@ -1280,25 +1631,12 @@ LOOP_LIFECYCLE_STATUSES = {
 }
 LOOP_CONTROL_STATUSES = {"running", "paused", "cancelled"}
 LOOP_TERMINAL_STATUSES = {"cancelled", "failed"}
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(token|password|secret|authorization|api[_-]?key)\s*[:=]\s*([^\s,;]+)"
-)
-_SECRET_TOKEN = re.compile(r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b")
-
-
 def _redact_text(value: str) -> str:
-    value = _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
-    return _SECRET_TOKEN.sub("[REDACTED]", value)
+    return _mcp_redaction_module().redact_text(value)
 
 
 def _redact_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return _redact_text(value)
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _redact_value(item) for key, item in value.items()}
-    return value
+    return _mcp_redaction_module().redact_value(value)
 
 
 @contextlib.contextmanager
@@ -2623,7 +2961,10 @@ def _claim_loop_instance(
     workflow_digest: str,
     instance_key: str,
     run_id: str,
-) -> Path:
+    staging_run_dir: Path,
+    final_run_dir: Path,
+    request_id: str | None,
+) -> tuple[Path, Path]:
     path = _loop_instance_registry_path(project, workflow_id, instance_key)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with _exclusive_path_lock(path.parent / ".registry.lock"):
@@ -2632,24 +2973,59 @@ def _claim_loop_instance(
             existing_run = existing.get("run_id") if isinstance(existing, dict) else None
             if isinstance(existing_run, str) and RUN_IDENTIFIER.fullmatch(existing_run):
                 existing_path = _runs_root(project) / existing_run
-                if (existing_path / "run.json").is_file():
+                existing_request = existing.get("request_id") if isinstance(existing, dict) else None
+                if existing_run == run_id and existing_request not in {None, request_id}:
+                    raise ContractError(
+                        "workflow.loop.instance_key",
+                        f"reserved run {run_id} belongs to another mutation request",
+                    )
+                if existing_run != run_id and (existing_path / "run.json").is_file():
                     existing_state = _read_json(existing_path / "run.json")
                     if existing_state.get("status") not in LOOP_TERMINAL_STATUSES:
                         raise ContractError(
                             "workflow.loop.instance_key",
                             f"active loop {existing_run} already owns instance {instance_key!r}",
                         )
+                if (
+                    existing_run != run_id
+                    and existing.get("publication_state") == "publishing"
+                    and isinstance(existing_request, str)
+                ):
+                    raise ContractError(
+                        "workflow.loop.instance_key",
+                        f"run {existing_run} is still publishing instance {instance_key!r}",
+                    )
         _atomic_json(
             path,
             {
                 "run_id": run_id,
+                "request_id": request_id,
                 "workflow_id": workflow_id,
                 "workflow_digest": workflow_digest,
                 "instance_key": instance_key,
+                "publication_state": "publishing",
                 "claimed_at": utc_now(),
             },
         )
-    return path
+        _mcp_test_failpoint("after-loop-instance-claim")
+        published_run_dir = _publish_prepared_run(
+            staging_run_dir,
+            final_run_dir,
+            request_id,
+        )
+        _atomic_json(
+            path,
+            {
+                "run_id": run_id,
+                "request_id": request_id,
+                "workflow_id": workflow_id,
+                "workflow_digest": workflow_digest,
+                "instance_key": instance_key,
+                "publication_state": "published",
+                "claimed_at": utc_now(),
+            },
+        )
+    return path, published_run_dir
 
 
 def _loop_worker_is_live(state: Mapping[str, Any]) -> bool:
@@ -3222,13 +3598,60 @@ async def execute_run(run_dir: Path) -> int:
         os.close(descriptor)
 
 
-def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
-    scope, source = resolve_workflow(args.workflow, project)
+def _publish_prepared_run(staging: Path, final: Path, request_id: str | None) -> Path:
+    if staging == final:
+        return staging
+    try:
+        staging.rename(final)
+    except OSError as exc:
+        if request_id is None:
+            raise
+        if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise
+        if not (final / "run.json").is_file():
+            raise ContractError("MCP run", f"reserved run {final.name} is incomplete")
+        state = _read_json(final / "run.json")
+        if not isinstance(state, dict) or state.get("mcp_request_id") != request_id:
+            raise ContractError("MCP run", f"reserved run {final.name} belongs to another request")
+    return final
+
+
+def _prepare_run(
+    args: argparse.Namespace,
+    project: Path,
+    *,
+    reserved_run_id: str | None = None,
+    request_id: str | None = None,
+) -> Path:
+    scope, source = resolve_workflow(
+        args.workflow,
+        project,
+        qualified_only=bool(getattr(args, "mcp_qualified_only", False)),
+    )
     inputs = _parse_input_values(args.inputs, args.input)
     terminal_grace_seconds = _terminal_grace_seconds()
-    run_id = f"exec_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{os.urandom(4).hex()}"
-    run_dir = _runs_root(project) / run_id
-    run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+    run_id = reserved_run_id or f"exec_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{os.urandom(4).hex()}"
+    final_run_dir = _runs_root(project) / run_id
+    if request_id is not None and (final_run_dir / "run.json").is_file():
+        state = _read_json(final_run_dir / "run.json")
+        if isinstance(state, dict) and state.get("mcp_request_id") == request_id:
+            if state.get("schema_version") == "codex-exec-loop-run.v1":
+                _, final_run_dir = _claim_loop_instance(
+                    project,
+                    str(state["workflow_id"]),
+                    str(state["workflow_digest"]),
+                    str(state["instance_key"]),
+                    run_id,
+                    final_run_dir,
+                    final_run_dir,
+                    request_id,
+                )
+            return final_run_dir
+        raise ContractError("MCP run", f"reserved run {run_id} belongs to another request")
+    preparing_root = _runs_root(project) / ".preparing"
+    preparing_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    run_dir = Path(tempfile.mkdtemp(prefix=f"{run_id}.", dir=preparing_root))
+    run_dir.chmod(0o700)
     try:
         _copy_workflow(source, run_dir / "workflow", project=project)
         workflow = load_workflow(run_dir / "workflow" / "workflow.json", project)
@@ -3259,8 +3682,8 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
             loop_inputs[outcome["feedback_input"]] = {}
         instance_key = _loop_instance_key(workflow, inputs)
         workflow_digest = _workflow_digest(workflow)
-        registry_path = _claim_loop_instance(
-            project, workflow["workflow_id"], workflow_digest, instance_key, run_id
+        registry_path = _loop_instance_registry_path(
+            project, workflow["workflow_id"], instance_key
         )
         cursor_input = workflow["loop"].get("cursor_input")
         initial_cursor = loop_inputs.get(cursor_input) if cursor_input else None
@@ -3309,6 +3732,9 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
             "failure_key_digest": None,
             "feedback_binding": None,
         }
+        if request_id is not None:
+            state["mcp_request_id"] = request_id
+            state["mcp_root_identity"] = getattr(args, "mcp_expected_root_identity", None)
         _atomic_json(run_dir / "run.json", state)
         _atomic_json(run_dir / "checkpoint.json", checkpoint)
         _atomic_json(
@@ -3324,7 +3750,17 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
             "loop.queued",
             {"instance_key": instance_key, "planned_calls_per_cycle": planned_calls},
         )
-        return run_dir
+        _, published_run_dir = _claim_loop_instance(
+            project,
+            workflow["workflow_id"],
+            workflow_digest,
+            instance_key,
+            run_id,
+            run_dir,
+            final_run_dir,
+            request_id,
+        )
+        return published_run_dir
 
     dependency_targets = {dependency for task in workflow["tasks"].values() for dependency in task["depends_on"]}
     leaves = sorted(set(workflow["tasks"]) - dependency_targets)
@@ -3358,8 +3794,11 @@ def _prepare_run(args: argparse.Namespace, project: Path) -> Path:
         "leaf_tasks": leaves,
         "tasks": {task_id: {"status": "pending"} for task_id in workflow["order"]},
     }
+    if request_id is not None:
+        state["mcp_request_id"] = request_id
+        state["mcp_root_identity"] = getattr(args, "mcp_expected_root_identity", None)
     _atomic_json(run_dir / "run.json", state)
-    return run_dir
+    return _publish_prepared_run(run_dir, final_run_dir, request_id)
 
 
 def _resolve_run(reference: str, project: Path) -> Path:
@@ -3392,18 +3831,28 @@ def _print_status(state: Mapping[str, Any]) -> None:
         print(f"  {task_id}: {task['status']}{details}")
 
 
-def _spawn_worker(run_dir: Path, project: Path) -> None:
+def _spawn_worker(
+    run_dir: Path,
+    project: Path,
+    *,
+    request_id: str | None = None,
+) -> subprocess.Popen[bytes]:
     log = (run_dir / "worker.log").open("ab")
     try:
-        subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--project-root",
-                str(project),
-                "_worker",
-                str(run_dir),
-            ],
+        state = _read_json(run_dir / "run.json")
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--project-root",
+            str(project),
+        ]
+        if state.get("mcp_root_identity"):
+            command.extend(["--mcp-expected-root-identity", str(state["mcp_root_identity"])])
+        command.extend(["_worker", str(run_dir)])
+        if request_id is not None:
+            command.extend(["--mutation-request-id", request_id])
+        return subprocess.Popen(
+            command,
             cwd=project,
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -3415,7 +3864,87 @@ def _spawn_worker(run_dir: Path, project: Path) -> None:
         log.close()
 
 
-def _request_loop_control(run_dir: Path, desired: str) -> dict[str, Any]:
+def _mutation_worker_is_live(transaction: Mapping[str, Any]) -> bool:
+    return _mcp_process_is_live(
+        transaction.get("worker_pid"),
+        transaction.get("worker_start_identity"),
+    )
+
+
+def _claim_mutation_worker(project: Path, request_id: str, run_id: str) -> bool:
+    pid = os.getpid()
+    identity = _process_start_identity(pid)
+    if identity is None:
+        raise ContractError("mutation worker", "cannot determine process identity")
+    try:
+        with _mutation_database(project) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM mutation_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None or row["run_id"] != run_id:
+                connection.execute("ROLLBACK")
+                raise ContractError("mutation worker", "request does not own this run")
+            transaction = _mutation_row(row)
+            if _mutation_worker_is_live(transaction) and transaction.get("worker_pid") != pid:
+                connection.execute("ROLLBACK")
+                return False
+            connection.execute(
+                """
+                UPDATE mutation_requests
+                SET worker_pid = ?, worker_start_identity = ?, phase = 'worker-claimed', updated_at = ?
+                WHERE request_id = ?
+                """,
+                (pid, identity, _precise_utc_now(), request_id),
+            )
+            connection.execute("COMMIT")
+    except sqlite3.Error as exc:
+        raise ContractError("mutation ledger", str(exc)) from exc
+    _mcp_test_failpoint("after-worker-claim")
+    return True
+
+
+def _start_or_recover_mutation_worker(
+    run_dir: Path,
+    project: Path,
+    transaction: Mapping[str, Any],
+) -> dict[str, Any]:
+    request_id = str(transaction["request_id"])
+    current = _mutation_lookup(project, request_id)
+    if current is None:
+        raise ContractError("request_id", "unknown mutation request")
+    if not _mutation_worker_is_live(current):
+        previous_claim = (current.get("worker_pid"), current.get("worker_start_identity"))
+        process = _spawn_worker(run_dir, project, request_id=request_id)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            current = _mutation_lookup(project, request_id)
+            if current is None:
+                raise ContractError("mutation worker", "request disappeared during spawn")
+            claim = (current.get("worker_pid"), current.get("worker_start_identity"))
+            if claim != previous_claim and isinstance(claim[0], int) and isinstance(claim[1], str):
+                break
+            if process.poll() not in (None, 0):
+                raise ContractError("mutation worker", "supervisor exited before claiming the request")
+            time.sleep(0.02)
+        else:
+            raise ContractError("mutation worker", "supervisor did not claim the request")
+    return _update_mutation_request(
+        project,
+        request_id,
+        phase="acknowledged",
+        acknowledged_at=_precise_utc_now(),
+        error=None,
+    )
+
+
+def _request_loop_control(
+    run_dir: Path,
+    desired: str,
+    *,
+    allow_already_applied: bool = False,
+) -> dict[str, Any]:
     if desired not in LOOP_CONTROL_STATUSES:
         raise ContractError("loop control", f"invalid desired status {desired!r}")
     with _exclusive_path_lock(run_dir / "loop-state.lock"):
@@ -3430,8 +3959,12 @@ def _request_loop_control(run_dir: Path, desired: str) -> dict[str, Any]:
             if current_status == "cancelled":
                 raise ContractError("run.status", "cancelled loops cannot be resumed")
             if _loop_worker_is_live(state) and current_status not in {"paused", "circuit-open", "failed"}:
+                if allow_already_applied:
+                    return state
                 raise ContractError("run.status", "loop supervisor is already running")
             if current_status == "queued" and state.get("worker_spawn_requested_at"):
+                if allow_already_applied:
+                    return state
                 raise ContractError("run.status", "loop supervisor resume is already queued")
             status = "queued"
             state.update(
@@ -3449,11 +3982,13 @@ def _request_loop_control(run_dir: Path, desired: str) -> dict[str, Any]:
         elif desired == "paused":
             if current_status in LOOP_TERMINAL_STATUSES:
                 raise ContractError("run.status", f"cannot pause {current_status} loop")
+            if allow_already_applied and current_status in {"paused", "pausing"}:
+                return state
             status = "paused" if not _loop_worker_is_live(state) else "pausing"
             state.update({"status": status, "next_wake_at": None})
             event_type = "loop.pause-requested"
         else:
-            if current_status == "cancelled":
+            if current_status == "cancelled" or (allow_already_applied and current_status == "cancelling"):
                 return state
             status = "cancelling" if _loop_worker_is_live(state) else "cancelled"
             state.update({"status": status, "next_wake_at": None})
@@ -3469,6 +4004,244 @@ def _request_loop_control(run_dir: Path, desired: str) -> dict[str, Any]:
         _append_loop_event_locked(run_dir, state, event_type, {"desired_status": desired})
         _rebuild_loop_projection(run_dir)
         return state
+
+
+def _mcp_result_metadata(run_dir: Path, state: Mapping[str, Any]) -> dict[str, Any]:
+    result_root = run_dir
+    result_state = state
+    if state.get("schema_version") == "codex-exec-loop-run.v1":
+        cycle_id = int(state.get("last_completed_cycle_id", 0))
+        if cycle_id < 1:
+            return {"available": False, "schema": None, "sha256": None, "task_count": 0}
+        result_root = run_dir / "cycles" / f"{cycle_id:06d}"
+        result_state = _read_json(result_root / "run.json")
+    task_ids = result_state.get("leaf_tasks", []) if isinstance(result_state, dict) else []
+    digests: list[dict[str, str]] = []
+    for task_id in task_ids:
+        path = result_root / "tasks" / str(task_id) / "final.json"
+        if path.is_file():
+            digests.append({"task": str(task_id), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    return {
+        "available": bool(digests),
+        "schema": "workflow-terminal-results.v1" if digests else None,
+        "sha256": digest_json(digests) if digests else None,
+        "task_count": len(digests),
+    }
+
+
+def _mcp_status_summary(
+    run_dir: Path,
+    state: Mapping[str, Any],
+    *,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    run_kind = "persistent" if state.get("schema_version") == "codex-exec-loop-run.v1" else "finite"
+    if run_kind == "persistent":
+        _read_loop_events(run_dir)
+    tasks = state.get("tasks", {})
+    counts: dict[str, int] = {}
+    if isinstance(tasks, dict):
+        for value in tasks.values():
+            status_value = value.get("status") if isinstance(value, dict) else "unknown"
+            status_name = str(status_value)
+            counts[status_name] = counts.get(status_name, 0) + 1
+    observed = str(state.get("status", "unknown"))
+    terminal = observed in TERMINAL_RUN_STATUSES if run_kind == "finite" else observed in LOOP_TERMINAL_STATUSES
+    summary: dict[str, Any] = {
+        "run_id": state.get("run_id"),
+        "request_id": request_id,
+        "run_kind": run_kind,
+        "workflow_id": state.get("workflow_id"),
+        "workflow_scope": state.get("workflow_scope"),
+        "workflow_digest": state.get("workflow_digest"),
+        "observed_status": observed,
+        "terminal": terminal,
+        "created_at": state.get("created_at"),
+        "updated_at": state.get("updated_at"),
+        "finished_at": state.get("finished_at"),
+        "task_counts": dict(sorted(counts.items())),
+        "call_usage": state.get("call_usage") or {
+            "planned": state.get("planned_calls"),
+            "maximum": state.get("max_calls"),
+        },
+        "result": _mcp_result_metadata(run_dir, state) if terminal else {
+            "available": False,
+            "schema": None,
+            "sha256": None,
+            "task_count": 0,
+        },
+    }
+    if run_kind == "persistent":
+        checkpoint = state.get("checkpoint", {}) if isinstance(state.get("checkpoint"), dict) else {}
+        summary["loop"] = {
+            "current_cycle_id": state.get("current_cycle_id"),
+            "last_cycle_id": state.get("last_cycle_id"),
+            "last_completed_cycle_id": state.get("last_completed_cycle_id"),
+            "checkpoint_cycle_id": checkpoint.get("cycle_id"),
+            "circuit_breaker": state.get("circuit_breaker"),
+            "consecutive_failures": state.get("consecutive_failures"),
+            "next_wake_at": state.get("next_wake_at"),
+        }
+    return summary
+
+
+def _mcp_lookup_request(project: Path, request_id: str) -> dict[str, Any]:
+    request_id = _mcp_uuid(request_id)
+    transaction, _ = _registered_request(project, request_id)
+    if transaction is None:
+        raise ContractError("request_id", "unknown MCP mutation request for this project")
+    return transaction
+
+
+def _mcp_run_request(args: argparse.Namespace, project: Path) -> dict[str, Any]:
+    request_id = _mcp_uuid(args.mcp_request_id)
+    normalized = _mcp_normalized_run_request(args, project)
+    request_digest = digest_json(normalized)
+    reserved_run_id = (
+        f"exec_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_"
+        f"{hashlib.sha256(request_id.encode('utf-8')).hexdigest()[:8]}"
+    )
+    transaction, legacy = _reserve_mutation_request(
+        project,
+        request_id=request_id,
+        operation="run",
+        request_digest=request_digest,
+        run_id=reserved_run_id,
+    )
+    if _mcp_request_operation(transaction) != "run":
+        raise ContractError("request_id", "was already used for a different MCP mutation operation")
+    if transaction.get("request_digest") != request_digest:
+        raise ContractError("request_id", "was already used for different run arguments")
+    if legacy:
+        if transaction.get("run_id") and transaction.get("spawn_state") == "acknowledged":
+            run_dir = _resolve_run(str(transaction["run_id"]), project)
+            state = _read_json(run_dir / "run.json")
+            result = _mcp_status_summary(run_dir, state, request_id=request_id)
+            result["spawn_state"] = "acknowledged"
+            return result
+        raise ContractError("request_id", "legacy mutation entries are read-only and cannot be resumed")
+    if transaction.get("phase") == "failed":
+        raise ContractError("MCP request", str(transaction.get("error") or "run preparation failed"))
+    _mcp_test_failpoint("after-request-reserved")
+    run_id = transaction.get("run_id")
+    if not isinstance(run_id, str):
+        raise ContractError("mutation ledger", "run request has no reserved run ID")
+    try:
+        if transaction.get("phase") == "bound":
+            run_dir = _prepare_run(
+                args,
+                project,
+                reserved_run_id=run_id,
+                request_id=request_id,
+            )
+            _mcp_test_failpoint("after-run-prepared")
+            state = _read_json(run_dir / "run.json")
+            transaction = _update_mutation_request(
+                project,
+                request_id,
+                phase="prepared",
+                run_kind=(
+                    "persistent"
+                    if state.get("schema_version") == "codex-exec-loop-run.v1"
+                    else "finite"
+                ),
+            )
+            _mcp_test_failpoint("after-run-recorded")
+        else:
+            run_dir = _resolve_run(run_id, project)
+            state = _read_json(run_dir / "run.json")
+        run_kind = "persistent" if state.get("schema_version") == "codex-exec-loop-run.v1" else "finite"
+        terminal_statuses = LOOP_TERMINAL_STATUSES if run_kind == "persistent" else TERMINAL_RUN_STATUSES
+        if state.get("status") not in terminal_statuses and not _mutation_worker_is_live(transaction):
+            transaction = _start_or_recover_mutation_worker(run_dir, project, transaction)
+        elif transaction.get("phase") != "acknowledged":
+            transaction = _update_mutation_request(
+                project,
+                request_id,
+                phase="acknowledged",
+                acknowledged_at=_precise_utc_now(),
+            )
+    except Exception as exc:
+        failure_phase = "failed" if transaction.get("phase") == "bound" else str(transaction.get("phase"))
+        _update_mutation_request(
+            project,
+            request_id,
+            phase=failure_phase,
+            error=_redact_text(str(exc)),
+        )
+        raise
+    _mcp_test_failpoint("before-run-response")
+    state = _read_json(run_dir / "run.json")
+    result = _mcp_status_summary(run_dir, state, request_id=request_id)
+    result["spawn_state"] = transaction.get("phase")
+    return result
+
+
+def _mcp_control_request(
+    args: argparse.Namespace,
+    project: Path,
+    run_dir: Path,
+    action: str,
+) -> dict[str, Any]:
+    request_id = _mcp_uuid(args.mcp_request_id)
+    normalized = {"run_id": run_dir.name, "action": action}
+    request_digest = digest_json(normalized)
+    state = _read_json(run_dir / "run.json")
+    run_kind = "persistent" if state.get("schema_version") == "codex-exec-loop-run.v1" else "finite"
+    if run_kind == "finite" and action in {"pause", "resume"}:
+        raise ContractError("workflow_control.action", "is unsupported for finite runs")
+    transaction, legacy = _reserve_mutation_request(
+        project,
+        request_id=request_id,
+        operation="control",
+        request_digest=request_digest,
+        run_id=run_dir.name,
+        run_kind=run_kind,
+        action=action,
+    )
+    if _mcp_request_operation(transaction) != "control":
+        raise ContractError("request_id", "was already used for a different MCP mutation operation")
+    if transaction.get("request_digest") != request_digest:
+        raise ContractError("request_id", "was already used for different control arguments")
+    if legacy and transaction.get("phase") != "acknowledged":
+        raise ContractError("request_id", "legacy mutation entries are read-only and cannot be resumed")
+    desired = {"pause": "paused", "resume": "running", "cancel": "cancelled"}[action]
+    if not legacy and transaction.get("phase") == "bound":
+        if run_kind == "persistent":
+            state = _request_loop_control(run_dir, desired, allow_already_applied=True)
+        elif action == "cancel":
+            _atomic_text(run_dir / "cancel.requested", utc_now() + "\n")
+        _mcp_test_failpoint("after-control-applied")
+        transaction = _update_mutation_request(
+            project,
+            request_id,
+            phase="control-applied",
+            desired_status=desired,
+        )
+    if not legacy and action == "resume":
+        state = _read_json(run_dir / "run.json")
+        if state.get("status") not in LOOP_TERMINAL_STATUSES and not _mutation_worker_is_live(transaction):
+            transaction = _start_or_recover_mutation_worker(run_dir, project, transaction)
+    if not legacy and transaction.get("phase") != "acknowledged":
+        transaction = _update_mutation_request(
+            project,
+            request_id,
+            phase="acknowledged",
+            acknowledged_at=_precise_utc_now(),
+        )
+    _mcp_test_failpoint("before-control-response")
+    state = _read_json(run_dir / "run.json")
+    return {
+        "request_id": request_id,
+        "run_id": run_dir.name,
+        "run_kind": run_kind,
+        "action": action,
+        "accepted": True,
+        "desired_status": transaction.get("desired_status") or desired,
+        "observed_status": state.get("status"),
+        "terminal": state.get("status") in (TERMINAL_RUN_STATUSES | LOOP_TERMINAL_STATUSES),
+        "reconcile_with": "workflow_status",
+    }
 
 
 def _tail_loop(run_dir: Path, lines: int, follow: bool) -> int:
@@ -3831,6 +4604,8 @@ def _install_workflow_updates(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="codex-workflows", description=__doc__)
     parser.add_argument("--project-root", help="Repository or project root; defaults to the current Git root")
+    parser.add_argument("--mcp-qualified-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--mcp-expected-root-identity", help=argparse.SUPPRESS)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     workflow = subparsers.add_parser("workflow", help="Create and manage reusable workflows")
@@ -3910,6 +4685,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--detach", action="store_true")
     run.add_argument("--allow-workspace-write", action="store_true")
     run.add_argument("--allow-danger-full-access", action="store_true")
+    run.add_argument("--mcp-request-id", help=argparse.SUPPRESS)
+    run.add_argument("--mcp-json", action="store_true", help=argparse.SUPPRESS)
 
     def add_prompt_options(command: argparse.ArgumentParser, *, allow_detach: bool) -> None:
         command.add_argument(
@@ -3973,9 +4750,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name in ("status", "wait", "result", "cancel", "pause", "resume", "tail"):
         command = subparsers.add_parser(name)
-        command.add_argument("run")
+        command.add_argument("run", nargs="?" if name == "status" else None)
         if name == "status":
             command.add_argument("--json", action="store_true")
+            command.add_argument("--mcp-json", action="store_true", help=argparse.SUPPRESS)
+            command.add_argument("--mcp-request-id", help=argparse.SUPPRESS)
+        if name in {"cancel", "pause", "resume"}:
+            command.add_argument("--mcp-json", action="store_true", help=argparse.SUPPRESS)
+            command.add_argument("--mcp-request-id", help=argparse.SUPPRESS)
         if name == "wait":
             command.add_argument("--timeout", type=int, default=0)
         if name == "result":
@@ -3985,6 +4767,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--follow", action="store_true")
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("run_dir")
+    worker.add_argument("--mutation-request-id", help=argparse.SUPPRESS)
     return parser
 
 
@@ -3994,6 +4777,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     project = _project_root(args.project_root)
     try:
+        _verify_mcp_root_identity(project, args.mcp_expected_root_identity)
         if args.command.startswith("prompt-") or args.command == "_prompt_worker":
             module_name = "workflow_governor._prompt_workflows_impl"
             prompt_workflows = sys.modules.get(module_name)
@@ -4189,7 +4973,11 @@ def main(argv: list[str] | None = None) -> int:
                             print(f"{scope}:{path.parent.name}\t{path}")
                             seen.add(key)
                 return 0
-            scope, path = resolve_workflow(args.workflow, project)
+            scope, path = resolve_workflow(
+                args.workflow,
+                project,
+                qualified_only=bool(args.mcp_qualified_only),
+            )
             loaded = load_workflow(
                 path,
                 project,
@@ -4219,7 +5007,11 @@ def main(argv: list[str] | None = None) -> int:
                 raise ContractError("max_parallel", "must be from 1 to 128")
             if not 1 <= args.max_calls <= MAX_CALLS:
                 raise ContractError("max_calls", f"must be from 1 to {MAX_CALLS}")
-            scope, path = resolve_workflow(args.workflow, project)
+            scope, path = resolve_workflow(
+                args.workflow,
+                project,
+                qualified_only=bool(args.mcp_qualified_only),
+            )
             workflow = load_workflow(path, project)
             inputs = _parse_input_values(args.inputs, args.input)
             validate_typed_values(inputs, workflow["inputs"], "inputs")
@@ -4268,7 +5060,16 @@ def main(argv: list[str] | None = None) -> int:
                 raise ContractError("max_parallel", "must be from 1 to 128")
             if not 1 <= args.max_calls <= MAX_CALLS:
                 raise ContractError("max_calls", f"must be from 1 to {MAX_CALLS}")
-            _, preview_path = resolve_workflow(args.workflow, project)
+            if args.mcp_request_id is not None:
+                if not args.mcp_json or not args.mcp_qualified_only or not args.detach:
+                    raise ContractError("MCP run", "requires --mcp-json, --mcp-qualified-only, and --detach")
+                print(json.dumps(_mcp_run_request(args, project), ensure_ascii=False, sort_keys=True))
+                return 0
+            _, preview_path = resolve_workflow(
+                args.workflow,
+                project,
+                qualified_only=bool(args.mcp_qualified_only),
+            )
             preview = load_workflow(preview_path, project)
             if preview.get("loop") and not args.detach:
                 raise ContractError("run", "until-cancelled workflows require --detach")
@@ -4306,9 +5107,46 @@ def main(argv: list[str] | None = None) -> int:
             run_dir = _resolve_run(requested.name, project)
             if requested != run_dir:
                 raise ContractError("run", "worker path does not match this project's run storage")
+            if args.mutation_request_id is not None:
+                request_id = _mcp_uuid(args.mutation_request_id)
+                if not _claim_mutation_worker(project, request_id, run_dir.name):
+                    return 0
             return asyncio.run(execute_run(run_dir))
-        run_dir = _resolve_run(args.run, project)
+        request_id: str | None = None
+        run_reference = args.run
+        if args.command == "status" and args.mcp_json:
+            if bool(run_reference) == bool(args.mcp_request_id):
+                raise ContractError("MCP status", "requires exactly one of run ID or --mcp-request-id")
+            if args.mcp_request_id:
+                transaction = _mcp_lookup_request(project, args.mcp_request_id)
+                run_reference = transaction.get("run_id")
+                request_id = args.mcp_request_id
+                run_is_published = (
+                    isinstance(run_reference, str)
+                    and (_runs_root(project) / run_reference / "run.json").is_file()
+                )
+                if not run_is_published:
+                    print(json.dumps({
+                        "request_id": request_id,
+                        "run_id": run_reference if isinstance(run_reference, str) else None,
+                        "start_state": transaction.get("phase", transaction.get("spawn_state", "unknown")),
+                        "observed_status": "unknown",
+                        "terminal": False,
+                    }, ensure_ascii=False, sort_keys=True))
+                    return 0
+        if not isinstance(run_reference, str):
+            raise ContractError("run", "is required")
+        run_dir = _resolve_run(run_reference, project)
         state = _read_json(run_dir / "run.json")
+        if args.command in {"cancel", "pause", "resume"} and args.mcp_request_id is not None:
+            if not args.mcp_json:
+                raise ContractError("MCP control", "requires --mcp-json")
+            print(json.dumps(
+                _mcp_control_request(args, project, run_dir, args.command),
+                ensure_ascii=False,
+                sort_keys=True,
+            ))
+            return 0
         if args.command == "cancel":
             if state.get("schema_version") == "codex-exec-loop-run.v1":
                 state = _request_loop_control(run_dir, "cancelled")
@@ -4356,6 +5194,13 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
                 time.sleep(0.5)
         if args.command == "status":
+            if args.mcp_json:
+                print(json.dumps(
+                    _mcp_status_summary(run_dir, state, request_id=request_id),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ))
+                return 0
             if state.get("schema_version") == "codex-exec-loop-run.v1":
                 _read_loop_events(run_dir)
                 _rebuild_loop_projection(run_dir)

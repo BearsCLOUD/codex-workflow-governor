@@ -1,7 +1,7 @@
 {
   "name": "codex-workflow-governor",
-  "version": "0.10.0+codex.20260821044059",
-  "description": "Run reusable asynchronous, adaptive, or persistent codex exec graphs",
+  "version": "0.10.0+codex.20260821044443",
+  "description": "Run reusable asynchronous, adaptive, or persistent codex exec graphs through CLI or local MCP",
   "author": {
     "name": "BearsCLOUD",
     "url": "https://github.com/BearsCLOUD"
@@ -19,6 +19,7 @@
     "instructions"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Workflow Governor",
     "shortDescription": "Run reusable async Codex task graphs.",

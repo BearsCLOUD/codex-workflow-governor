@@ -7,6 +7,21 @@ description: Run, monitor, save, and reuse asynchronous codex exec task graphs, 
 
 Resolve `scripts/codex_workflows.py` relative to this `SKILL.md` and use that absolute path as the executable interface (`CLI` below). In a full plugin checkout, the root `scripts/codex_workflows.py` is an equivalent convenience launcher.
 
+When the plugin's `workflow-governor-local` MCP server is available, prefer its
+typed `workflow_plan`, `workflow_run`, `workflow_status`, and `workflow_control`
+tools for an already authorized local Git worktree. MCP delegates to this same
+CLI and does not add a second engine. Do not attempt to authorize a project from
+an MCP tool; the user must run the plugin-root
+`scripts/workflow_mcp_roots.py authorize /absolute/git/worktree` helper.
+
+For MCP mutations, generate and retain one canonical UUIDv4 `request_id` before
+the first call. Reconcile a timeout with `workflow_status(request_id=...)` and
+reuse that same ID only for an identical retry. Request IDs are unique across
+both run and control operations. The CLI supervisor, not MCP, owns their
+SQLite-backed reservation and recovery. Continue using the CLI directly for
+shell/CI flows, prompt-compiled adaptive waves, authoring, installation, agent
+binding, tailing, and complete result bodies.
+
 ## Choose the smallest mechanism
 
 1. Use one direct `codex exec` call for one isolated task with no reusable graph.
