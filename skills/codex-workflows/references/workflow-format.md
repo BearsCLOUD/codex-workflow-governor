@@ -103,6 +103,13 @@ Every task requires `id`, `depends_on`, `prompt`, and `output_schema`. Optional 
 - `item_name`: local placeholder name for a fan-out item; defaults to `item`;
 - `max_items`: enforced fan-out bound from `1` to `10000`; defaults to `1000`;
 - `model` and `reasoning_effort`: override Codex execution settings;
+- `model` and `reasoning_effort` may instead be exactly one declared string-input
+  placeholder such as `{{ inputs.worker-model }}`. A templated setting requires
+  the matching non-empty unique `model_allowlist` or
+  `reasoning_effort_allowlist`; `plan` and run preparation resolve and validate
+  it before any worker starts. The resolved per-task values are persisted in the
+  run plan, and resume fails if they no longer match that authority. Change an
+  active loop profile only by cancelling it and starting a new run.
 - `sandbox`: `read-only`, `workspace-write`, or `danger-full-access`; defaults to `read-only`;
 - `agent`: v2-only pinned role name; mutually exclusive with task model, reasoning, and sandbox fields;
 - `cwd`: project-relative task working directory;

@@ -1140,7 +1140,7 @@ def load_workflow(
     allowed_optional = {
         "foreach", "item_name", "model", "reasoning_effort", "sandbox", "cwd",
         "timeout_seconds", "retries", "max_items", "agent", "idempotency_key",
-        "write_isolation",
+        "write_isolation", "model_allowlist", "reasoning_effort_allowlist",
     }
     root = path.parent.resolve()
     for index, item in enumerate(raw["tasks"]):
@@ -1216,6 +1216,41 @@ def load_workflow(
         for field in ("model", "reasoning_effort"):
             if field in item and (not isinstance(item[field], str) or not item[field].strip()):
                 raise ContractError(f"{task_path}.{field}", "must be a non-empty string")
+            allowlist_field = f"{field}_allowlist"
+            allowlist = item.get(allowlist_field)
+            if allowlist is not None:
+                if (
+                    not isinstance(allowlist, list)
+                    or not allowlist
+                    or not all(isinstance(value, str) and value.strip() for value in allowlist)
+                    or len(set(allowlist)) != len(allowlist)
+                ):
+                    raise ContractError(
+                        f"{task_path}.{allowlist_field}",
+                        "must be a non-empty array of unique non-empty strings",
+                    )
+            value = item.get(field)
+            match = PLACEHOLDER.fullmatch(value) if isinstance(value, str) else None
+            if isinstance(value, str) and ("{{" in value or "}}" in value) and not match:
+                raise ContractError(
+                    f"{task_path}.{field}",
+                    "template must be exactly one declared string input placeholder",
+                )
+            if match:
+                expression = match.group(1).strip()
+                parts = expression.split(".")
+                if len(parts) != 2 or parts[0] != "inputs" or inputs.get(parts[1]) != "string":
+                    raise ContractError(
+                        f"{task_path}.{field}",
+                        "template must reference exactly one declared string input",
+                    )
+                if allowlist is None:
+                    raise ContractError(
+                        f"{task_path}.{allowlist_field}",
+                        "is required for a templated execution setting",
+                    )
+            elif isinstance(value, str) and allowlist is not None and value not in allowlist:
+                raise ContractError(f"{task_path}.{field}", "must be present in its allowlist")
         cwd = item.get("cwd", ".")
         cwd_path = Path(cwd) if isinstance(cwd, str) else Path("..")
         if not isinstance(cwd, str) or cwd_path.is_absolute() or ".." in cwd_path.parts:
@@ -1414,6 +1449,31 @@ def load_workflow(
         "order": visited,
         "path": path.resolve(),
     }
+
+
+def _resolve_execution_settings(
+    workflow: dict[str, Any], inputs: Mapping[str, Any]
+) -> dict[str, Any]:
+    for task_id, task in workflow["tasks"].items():
+        for field in ("model", "reasoning_effort"):
+            value = task.get(field)
+            match = PLACEHOLDER.fullmatch(value) if isinstance(value, str) else None
+            if not match:
+                continue
+            resolved = _resolve_path(match.group(1).strip(), inputs, {}, {})
+            if not isinstance(resolved, str) or not resolved.strip():
+                raise ContractError(
+                    f"workflow.tasks.{task_id}.{field}",
+                    "must resolve to a non-empty string",
+                )
+            allowlist = task[f"{field}_allowlist"]
+            if resolved not in allowlist:
+                raise ContractError(
+                    f"workflow.tasks.{task_id}.{field}",
+                    f"resolved value {resolved!r} is not allowed",
+                )
+            task[field] = resolved
+    return workflow
 
 
 def _resolve_path(expression: str, inputs: Mapping[str, Any], outputs: Mapping[str, Any], local: Mapping[str, Any]) -> Any:
@@ -2567,6 +2627,15 @@ async def _execute_run(run_dir: Path) -> int:
     # Keep dynamically bound repair feedback in memory/private binding artifacts;
     # lifecycle run.json must not gain raw findings.
     inputs = dict(state["inputs"])
+    state_schema = state.get("schema_version")
+    if state_schema in {"codex-exec-run.v2", "codex-exec-cycle-run.v2"}:
+        if not isinstance(state.get("input_digest"), str):
+            raise ContractError("run.input_digest", "is required by this run schema")
+        if digest_json(inputs) != state["input_digest"]:
+            raise ContractError("run.input_digest", "persisted inputs no longer match queued run authority")
+    _resolve_execution_settings(workflow, inputs)
+    if _execution_plan(workflow, inputs)[0] != state.get("plan"):
+        raise ContractError("run.plan", "resolved execution settings no longer match queued run authority")
     if loop_run_dir is not None:
         permissions = state.get("loop_permissions", {})
         allowed = sorted(name for name, enabled in permissions.items() if enabled)
@@ -3132,7 +3201,7 @@ def _prepare_loop_cycle(
     }
     leaves = sorted(set(workflow["tasks"]) - dependency_targets)
     cycle_state = {
-        "schema_version": "codex-exec-cycle-run.v1",
+        "schema_version": "codex-exec-cycle-run.v2",
         "run_id": f"{outer_state['run_id']}_cycle_{cycle_id:06d}",
         "loop_run_dir": str(loop_run_dir),
         "cycle_id": cycle_id,
@@ -3142,6 +3211,7 @@ def _prepare_loop_cycle(
         "project_root": outer_state["project_root"],
         "execution_root": str(execution_root),
         "inputs": cycle_inputs,
+        "input_digest": digest_json(cycle_inputs),
         "codex_bin": outer_state["codex_bin"],
         "max_parallel": outer_state["max_parallel"],
         "max_calls": budget,
@@ -3233,6 +3303,9 @@ async def _execute_loop_run(run_dir: Path) -> int:
         raise ContractError("run", "loop run snapshot has no loop contract")
     if _workflow_digest(workflow) != state.get("workflow_digest"):
         raise ContractError("run.workflow_digest", "snapshot no longer matches queued loop authority")
+    _resolve_execution_settings(workflow, state["base_inputs"])
+    if _execution_plan(workflow, state["base_inputs"])[0] != state.get("plan"):
+        raise ContractError("run.plan", "resolved execution settings no longer match queued loop authority")
     _read_loop_events(run_dir)
     _rebuild_loop_projection(run_dir)
 
@@ -3656,6 +3729,7 @@ def _prepare_run(
         _copy_workflow(source, run_dir / "workflow", project=project)
         workflow = load_workflow(run_dir / "workflow" / "workflow.json", project)
         validate_typed_values(inputs, workflow["inputs"], "inputs")
+        _resolve_execution_settings(workflow, inputs)
         planned_tasks, planned_calls = _execution_plan(workflow, inputs)
         effective_call_budget = (
             min(args.max_calls, workflow["loop"]["max_calls_per_cycle"])
@@ -3765,7 +3839,7 @@ def _prepare_run(
     dependency_targets = {dependency for task in workflow["tasks"].values() for dependency in task["depends_on"]}
     leaves = sorted(set(workflow["tasks"]) - dependency_targets)
     state = {
-        "schema_version": "codex-exec-run.v1",
+        "schema_version": "codex-exec-run.v2",
         "run_id": run_id,
         "workflow_id": workflow["workflow_id"],
         "workflow_scope": scope,
@@ -3782,6 +3856,7 @@ def _prepare_run(
         },
         "project_root": str(project),
         "inputs": inputs,
+        "input_digest": digest_json(inputs),
         "codex_bin": args.codex_bin,
         "max_parallel": args.max_parallel or workflow["max_parallel"],
         "max_calls": args.max_calls,
@@ -5015,6 +5090,7 @@ def main(argv: list[str] | None = None) -> int:
             workflow = load_workflow(path, project)
             inputs = _parse_input_values(args.inputs, args.input)
             validate_typed_values(inputs, workflow["inputs"], "inputs")
+            _resolve_execution_settings(workflow, inputs)
             planned_tasks, planned_calls = _execution_plan(workflow, inputs)
             effective_call_budget = (
                 min(args.max_calls, workflow["loop"]["max_calls_per_cycle"])

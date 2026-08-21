@@ -4,5 +4,11 @@
   "authoritative-branch": "main",
   "canonical-checkout": "/home/ai1/workflow_plugin",
   "plugin-selector": "codex-workflow-governor@personal",
-  "repair-context": {}
+  "repair-context": {},
+  "routine-model": "gpt-5.6-luna",
+  "routine-effort": "medium",
+  "coding-model": "gpt-5.6-luna",
+  "coding-effort": "high",
+  "gate-model": "gpt-5.6-sol",
+  "gate-effort": "medium"
 }

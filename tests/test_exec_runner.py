@@ -591,6 +591,134 @@ class ExecRunnerTestCase(unittest.TestCase):
 
 
 class ExecutionTests(ExecRunnerTestCase):
+    def test_input_templated_execution_settings_resolve_and_are_persisted(self) -> None:
+        workflow = self.write_workflow(
+            "input-profile",
+            [{
+                "id": "worker",
+                "depends_on": [],
+                "prompt": "PROFILE",
+                "output_schema": "schemas/worker.json",
+                "model": "{{ inputs.worker-model }}",
+                "model_allowlist": ["gpt-5.6-luna"],
+                "reasoning_effort": "{{ inputs.worker-effort }}",
+                "reasoning_effort_allowlist": ["medium", "high"],
+            }],
+            {"worker": OBJECT_SCHEMA},
+            inputs={"worker-model": "string", "worker-effort": "string"},
+        )
+        values = [
+            "--input", 'worker-model="gpt-5.6-luna"',
+            "--input", 'worker-effort="medium"',
+        ]
+        code, stdout, stderr = self.invoke("plan", str(workflow), *values)
+        self.assertEqual(code, 0, stderr)
+        task = json.loads(stdout)["tasks"][0]
+        self.assertEqual((task["model"], task["reasoning_effort"]), ("gpt-5.6-luna", "medium"))
+
+        code, _, stderr = self.invoke(
+            "run", str(workflow), *values, "--codex-bin", str(self.fake_codex)
+        )
+        self.assertEqual(code, 0, stderr)
+        state = json.loads((self.only_run_dir() / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["plan"][0]["model"], "gpt-5.6-luna")
+        call = self.fake_log()["calls"][0]
+        self.assertIn("gpt-5.6-luna", call["argv"])
+        self.assertIn('model_reasoning_effort="medium"', call["argv"])
+
+    def test_input_templated_execution_settings_fail_closed(self) -> None:
+        base = {
+            "id": "worker",
+            "depends_on": [],
+            "prompt": "PROFILE",
+            "output_schema": "schemas/worker.json",
+            "model": "{{ inputs.worker-model }}",
+            "model_allowlist": ["gpt-5.6-luna"],
+        }
+        for name, task, inputs, error in (
+            ("profile-unknown", base, {"other": "string"}, "declared string input"),
+            ("profile-no-allowlist", {k: v for k, v in base.items() if k != "model_allowlist"}, {"worker-model": "string"}, "allowlist"),
+            ("profile-task-output", {**base, "model": "{{ tasks.worker.output }}"}, {"worker-model": "string"}, "declared string input"),
+            ("profile-embedded-input", {**base, "model": "prefix-{{ inputs.worker-model }}"}, {"worker-model": "string"}, "exactly one"),
+            ("profile-embedded-task", {**base, "model": "{{ tasks.worker.output }}-suffix"}, {"worker-model": "string"}, "exactly one"),
+            ("profile-embedded-item", {**base, "model": "{{ item }}-suffix"}, {"worker-model": "string"}, "exactly one"),
+        ):
+            with self.subTest(name=name):
+                workflow = self.write_workflow(name, [task], {"worker": OBJECT_SCHEMA}, inputs=inputs)
+                with self.assertRaisesRegex(ContractError, error):
+                    load_workflow(workflow / "workflow.json", self.project)
+
+        workflow = self.write_workflow(
+            "profile-denied",
+            [base],
+            {"worker": OBJECT_SCHEMA},
+            inputs={"worker-model": "string"},
+        )
+        code, _, stderr = self.invoke(
+            "plan", str(workflow), "--input", 'worker-model="gpt-5.6-sol"'
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("is not allowed", stderr)
+
+    def test_finite_run_rejects_persisted_input_or_plan_tampering(self) -> None:
+        workflow = self.write_workflow(
+            "profile-tamper",
+            [{
+                "id": "worker",
+                "depends_on": [],
+                "prompt": "PROFILE {{ inputs.request }}",
+                "output_schema": "schemas/worker.json",
+                "model": "{{ inputs.worker-model }}",
+                "model_allowlist": ["gpt-5.6-luna"],
+            }],
+            {"worker": OBJECT_SCHEMA},
+            inputs={"worker-model": "string", "request": "string"},
+        )
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            code, _, stderr = self.invoke(
+                "run", str(workflow), "--input", 'worker-model="gpt-5.6-luna"',
+                "--input", 'request="original"',
+                "--codex-bin", str(self.fake_codex), "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+        state_path = run_dir / "run.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertIn("input_digest", state)
+        state.pop("input_digest")
+        state["inputs"]["request"] = "tampered"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        worker_code, _, worker_stderr = self.invoke("_worker", str(run_dir))
+        self.assertEqual(worker_code, 2)
+        self.assertIn("required by this run schema", worker_stderr)
+
+    def test_finite_run_rejects_resolved_plan_tampering(self) -> None:
+        workflow = self.write_workflow(
+            "profile-plan-tamper",
+            [{
+                "id": "worker", "depends_on": [], "prompt": "PROFILE",
+                "output_schema": "schemas/worker.json",
+                "model": "{{ inputs.worker-model }}",
+                "model_allowlist": ["gpt-5.6-luna"],
+            }],
+            {"worker": OBJECT_SCHEMA},
+            inputs={"worker-model": "string"},
+        )
+        with patch("workflow_governor._exec_runner_impl.subprocess.Popen"):
+            code, _, stderr = self.invoke(
+                "run", str(workflow), "--input", 'worker-model="gpt-5.6-luna"',
+                "--codex-bin", str(self.fake_codex), "--detach",
+            )
+        self.assertEqual(code, 0, stderr)
+        run_dir = self.only_run_dir()
+        state_path = run_dir / "run.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["plan"][0]["model"] = "gpt-5.6-sol"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        worker_code, _, worker_stderr = self.invoke("_worker", str(run_dir))
+        self.assertEqual(worker_code, 2)
+        self.assertIn("resolved execution settings no longer match", worker_stderr)
+
     def test_fanout_is_bounded_ordered_formal_and_persisted(self) -> None:
         workflow = self.write_workflow(
             "fanout-synthesis",
@@ -1591,10 +1719,47 @@ class LoopWorkflowTests(ExecRunnerTestCase):
         self.assertEqual(workflow["loop"]["jitter_seconds"], 0)
         self.assertEqual(discover["sandbox"], "danger-full-access")
         self.assertEqual(discover["write_isolation"], "git-worktree")
-        self.assertIn("detached isolated worktree", discover["prompt"])
-        self.assertIn("do not require a local branch checkout", discover["prompt"])
-        self.assertEqual(implement["model"], "gpt-5.6-luna")
-        self.assertEqual(implement["reasoning_effort"], "xhigh")
+        self.assertIn("detached worktree", discover["prompt"])
+        self.assertIn("local branch checkout is unnecessary", discover["prompt"])
+        prompts = [task["prompt"] for task in workflow["tasks"].values()]
+        self.assertLessEqual(sum(len(prompt.encode("utf-8")) for prompt in prompts), 5000)
+        prompt_contract = {
+            "discover": ("untrusted", "minimum `(updatedAt, number)`", "unchanged OPEN", "previous cursor", "Never edit"),
+            "implement": ("untrusted", "matching prior feedback", "HEAD=base_sha", "smallest complete fix", "focused tests", "Never stage"),
+            "review": ("Read-only", "actual diff", "zero actionable findings", "Never edit"),
+            "repair": ("same worktree", "repair every confirmed finding", "regression test", "no-op/no-repair", "Never commit"),
+            "final-review": ("Independent read-only final gate", "actual complete diff", "every finding", "concrete changes-required", "Never modify"),
+            "deliver": ("independently approved", "stop at first failure", "exact remote ref equal base_sha", "non-force push exactly", "verify selector/version", "close only selected issue", "previous cursor", "zero-padded-20-digit-number", "Never force-push"),
+        }
+        for task_id, required in prompt_contract.items():
+            with self.subTest(task_id=task_id):
+                prompt = workflow["tasks"][task_id]["prompt"]
+                for marker in required:
+                    self.assertIn(marker, prompt)
+        self.assertEqual(workflow["loop"]["max_consecutive_failures"], 2)
+        self.assertEqual(workflow["loop"]["outcome"]["feedback_input"], "repair-context")
+        self.assertEqual(implement["model"], "{{ inputs.coding-model }}")
+        self.assertEqual(implement["reasoning_effort"], "{{ inputs.coding-effort }}")
+        self.assertEqual(implement["reasoning_effort_allowlist"], ["high"])
+
+        inputs = json.loads(
+            (repository / ".codex/exec-workflows/github-issue-delivery/example-inputs.json")
+            .read_text(encoding="utf-8")
+        )
+        code, stdout, stderr = self.invoke(
+            "plan",
+            str(repository / ".codex/exec-workflows/github-issue-delivery"),
+            "--inputs", str(repository / ".codex/exec-workflows/github-issue-delivery/example-inputs.json"),
+            "--max-calls", "6",
+        )
+        self.assertEqual(code, 0, stderr)
+        plan = json.loads(stdout)
+        effective = {task["id"]: (task["model"], task["reasoning_effort"]) for task in plan["tasks"]}
+        self.assertEqual(effective["discover"], (inputs["routine-model"], inputs["routine-effort"]))
+        self.assertEqual(effective["review"], (inputs["routine-model"], inputs["routine-effort"]))
+        for task_id in ("implement", "repair", "deliver"):
+            self.assertEqual(effective[task_id], (inputs["coding-model"], inputs["coding-effort"]))
+        self.assertEqual(effective["final-review"], (inputs["gate-model"], inputs["gate-effort"]))
 
     def test_bundled_monitors_validate_install_and_deny_mutations(self) -> None:
         for name in ("loop-monitor", "github-issue-worker"):
