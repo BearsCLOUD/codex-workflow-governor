@@ -1,0 +1,80 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["delivered", "no-issues", "published-pending-reconciliation", "blocked"]},
+    "summary": {"type": "string"},
+    "base_sha": {"type": "string"},
+    "reviewed_tree_digest": {"type": "string"},
+    "reviewed_diff_digest": {"type": "string"},
+    "issue_snapshot_digest": {"type": "string"},
+    "delivered_sha": {"type": "string"},
+    "recovery_schema_version": {"type": "string", "enum": ["github-issues-batch-recovery.v1"]},
+    "recovery_phase": {"type": "string", "enum": ["none", "prepared", "published-pending-reconciliation", "reconciled"]},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": {"type": "integer"},
+          "content_digest": {"type": "string"},
+          "plan_disposition": {"type": "string", "enum": ["implement", "duplicate", "superseded"]},
+          "depends_on": {"type": "array", "items": {"type": "integer"}},
+          "design_required": {"type": "boolean"},
+          "design_ref": {"type": "string"},
+          "acceptance": {"type": "array", "items": {"type": "string"}},
+          "files": {"type": "array", "items": {"type": "string"}},
+          "tests": {"type": "array", "items": {"type": "string"}},
+          "finding_ids": {"type": "array", "items": {"type": "string"}},
+          "status": {"type": "string", "enum": ["closed", "unchanged"]},
+          "evidence": {"type": "string"}
+        },
+        "required": ["number", "content_digest", "plan_disposition", "depends_on", "design_required", "design_ref", "acceptance", "files", "tests", "finding_ids", "status", "evidence"],
+        "additionalProperties": false
+      }
+    },
+    "recovery_manifest_digest": {"type": "string"},
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "action": {"type": "string", "enum": ["commit", "persist-prepared", "push", "persist-published-pending", "verify-remote", "reinstall-plugin", "close-issues", "sync-repository-authority", "sync-delivery-task", "sync-feature-map", "recover-existing-commit", "recover-reconciliation"]},
+          "status": {"type": "string", "enum": ["completed", "failed", "not-run"]},
+          "evidence": {"type": "string"}
+        },
+        "required": ["action", "status", "evidence"],
+        "additionalProperties": false
+      }
+    },
+    "validations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "status": {"type": "string", "enum": ["passed", "failed"]},
+          "evidence": {"type": "string"}
+        },
+        "required": ["name", "status", "evidence"],
+        "additionalProperties": false
+      }
+    },
+    "reconciliation": {
+      "type": "object",
+      "properties": {
+        "remote": {"type": "string", "enum": ["not-started", "pending", "completed", "blocked"]},
+        "plugin": {"type": "string", "enum": ["not-started", "pending", "completed", "blocked"]},
+        "issues": {"type": "string", "enum": ["not-started", "pending", "completed", "blocked"]},
+        "repository_authority": {"type": "string", "enum": ["not-started", "pending", "completed", "blocked"]},
+        "delivery_task": {"type": "string", "enum": ["not-started", "pending", "completed", "blocked"]},
+        "feature_map": {"type": "string", "enum": ["not-started", "pending", "completed", "blocked"]},
+        "evidence": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["remote", "plugin", "issues", "repository_authority", "delivery_task", "feature_map", "evidence"],
+      "additionalProperties": false
+    },
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "summary", "base_sha", "reviewed_tree_digest", "reviewed_diff_digest", "issue_snapshot_digest", "delivered_sha", "recovery_schema_version", "recovery_phase", "issues", "recovery_manifest_digest", "actions", "validations", "reconciliation", "blockers"],
+  "additionalProperties": false
+}

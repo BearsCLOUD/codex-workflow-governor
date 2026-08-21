@@ -92,6 +92,18 @@ def classify(prompt: str) -> dict[str, object]:
         return {"kind": "workflow-audit-challenge"}
     if prompt.startswith("Produce the final evidence-ranked audit verdict"):
         return {"kind": "workflow-audit-verdict"}
+    for prefix, kind in (
+        ("BATCH-INVENTORY", "batch-inventory"),
+        ("BATCH-PLAN-DESIGN", "batch-plan-design"),
+        ("BATCH-DESIGN-REVIEW", "batch-design-review"),
+        ("BATCH-IMPLEMENT", "batch-implement"),
+        ("BATCH-ADVERSARIAL-REVIEW", "batch-adversarial-review"),
+        ("BATCH-REPAIR", "batch-repair"),
+        ("BATCH-FINAL-REVIEW", "batch-final-review"),
+        ("BATCH-DELIVER", "batch-deliver"),
+    ):
+        if prompt.startswith(prefix):
+            return {"kind": kind}
     for kind in (
         "terminal-missing",
         "terminal-malformed",
@@ -344,6 +356,447 @@ try:
         }
     elif identity["kind"] == "loop-process":
         output = {"ok": True}
+    elif str(identity["kind"]).startswith("batch-"):
+        scenario = os.environ.get("FAKE_BATCH_SCENARIO", "no-design")
+        kind = str(identity["kind"])
+        def embedded(label: str) -> dict[str, object]:
+            start = prompt.index(label + "=") + len(label) + 1
+            value, _ = json.JSONDecoder().raw_decode(prompt[start:])
+            return value
+        no_issues = scenario == "no-issues"
+        preflight_blocked = scenario in {"dirty-base", "overflow", "unstable-reread"}
+        design_rejected = scenario == "design-rejected"
+        snapshot = "snapshot-1"
+        base = "a" * 40
+        tree = "1" * 64
+        diff = "2" * 64
+        validation = [{"name": "fixture", "status": "passed", "evidence": "fixture"}]
+        finding = {
+            "id": "F1",
+            "severity": "high",
+            "issue_numbers": [7],
+            "summary": "Fixture finding",
+            "evidence": "fixture",
+            "required_test": "test_fixture",
+        }
+        def issue_traces(finding_ids: list[str] | None = None) -> list[dict[str, object]]:
+            ids = finding_ids or []
+            values = [{
+                "number": 7,
+                "content_digest": "issue-7",
+                "plan_disposition": "implement",
+                "depends_on": [],
+                "design_required": scenario in {"design-approved", "design-rejected"},
+                "design_ref": "DES-7" if scenario in {"design-approved", "design-rejected"} else "",
+                "acceptance": ["works"],
+                "files": ["fixture.py"],
+                "tests": ["test_fixture"],
+                "finding_ids": ids,
+            }]
+            if scenario == "overlap":
+                values.append({
+                    "number": 8,
+                    "content_digest": "issue-8",
+                    "plan_disposition": "duplicate",
+                    "depends_on": [7],
+                    "design_required": False,
+                    "design_ref": "",
+                    "acceptance": ["covered by issue 7"],
+                    "files": ["fixture.py"],
+                    "tests": ["test_fixture"],
+                    "finding_ids": [],
+                })
+            return values
+        if kind == "batch-inventory":
+            status = "no-issues" if no_issues else ("blocked" if preflight_blocked else "ready")
+            issues = []
+            if status == "ready":
+                issues = [{
+                    "number": 7,
+                    "updated_at": "2026-08-21T00:00:00Z",
+                    "digest": "issue-7",
+                    "title_bytes": 7,
+                    "body_bytes": 11,
+                }]
+                if scenario == "overlap":
+                    issues.append({
+                        "number": 8,
+                        "updated_at": "2026-08-21T00:00:00Z",
+                        "digest": "issue-8",
+                        "title_bytes": 8,
+                        "body_bytes": 12,
+                    })
+            output = {
+                "status": status,
+                "summary": "fixture",
+                "base_sha": base,
+                "remote_sha": base,
+                "issues": issues,
+                "aggregate_bytes": sum(item["title_bytes"] + item["body_bytes"] for item in issues),
+                "issue_snapshot_digest": snapshot,
+                "writer_runs": [{"run_id": "old-loop", "status": "cancelled", "evidence_digest": "terminal"}],
+                "blockers": ["inventory bound or base failure"] if preflight_blocked else [],
+            }
+        elif kind == "batch-plan-design":
+            inventory = embedded("INVENTORY")
+            status = "no-issues" if inventory["status"] == "no-issues" else (
+                "blocked" if inventory["status"] == "blocked" or scenario == "snapshot-mismatch" else "planned"
+            )
+            if scenario == "spurious-no-issues":
+                status = "no-issues"
+            if scenario == "mixed-state":
+                status = "blocked"
+            required = scenario in {"design-approved", "design-rejected"}
+            items = []
+            if status == "planned":
+                items = [{
+                    "number": 7,
+                    "content_digest": "issue-7",
+                    "disposition": "implement",
+                    "depends_on": [],
+                    "design_required": scenario in {"design-approved", "design-rejected"},
+                    "design_ref": "DES-7" if scenario in {"design-approved", "design-rejected"} else "",
+                    "design_required": required,
+                    "design_ref": "DES-7" if required else "",
+                    "acceptance": ["works"],
+                    "files": ["fixture.py"],
+                    "tests": ["test_fixture"],
+                }]
+                if scenario == "overlap":
+                    items.append({
+                        "number": 8,
+                        "content_digest": "issue-8",
+                        "disposition": "duplicate",
+                        "depends_on": [7],
+                        "design_required": False,
+                        "design_ref": "",
+                        "design_required": False,
+                        "design_ref": "",
+                        "acceptance": ["covered by issue 7"],
+                        "files": [],
+                        "tests": [],
+                    })
+            output = {
+                "status": status,
+                "summary": "fixture",
+                "base_sha": base,
+                "issue_snapshot_digest": snapshot,
+                "items": items,
+                "design_drafts": ([{
+                    "page_id": "DES-7",
+                    "revision": 1,
+                    "status": "Review",
+                    "issue_numbers": [7],
+                    "evidence_digest": "design-evidence",
+                }] if required and status == "planned" else []),
+                "blockers": ["preflight or snapshot mismatch"] if status == "blocked" else [],
+            }
+        elif kind == "batch-design-review":
+            inventory = embedded("INVENTORY")
+            plan = embedded("PLAN")
+            if "blocked" in {inventory["status"], plan["status"]}:
+                status = "blocked"
+            elif inventory["status"] == "no-issues" and plan["status"] == "no-issues":
+                status = "no-issues"
+            elif "no-issues" in {inventory["status"], plan["status"]}:
+                status = "blocked"
+            elif design_rejected:
+                status = "rejected"
+            elif scenario == "design-approved":
+                status = "approved"
+            else:
+                status = "not-required"
+            output = {
+                "status": status,
+                "summary": "fixture",
+                "issue_snapshot_digest": snapshot,
+                "issue_traces": issue_traces() if status in {"approved", "not-required", "rejected"} else [],
+                "designs": ([{
+                    "page_id": "DES-7",
+                    "revision": 1,
+                    "status": "rejected" if design_rejected else "approved",
+                    "issue_numbers": [7],
+                    "evidence_digest": "design-review",
+                }] if scenario in {"design-approved", "design-rejected"} else []),
+                "findings": ([{
+                    "id": "D1",
+                    "severity": "high",
+                    "issue_numbers": [7],
+                    "summary": "Design incomplete",
+                    "evidence": "fixture",
+                }] if design_rejected else []),
+                "blockers": ["design rejected"] if status in {"rejected", "blocked"} else [],
+            }
+        elif kind == "batch-implement":
+            inventory = embedded("INVENTORY")
+            plan = embedded("PLAN")
+            design = embedded("DESIGN_GATE")
+            predecessor = {inventory["status"], plan["status"], design["status"]}
+            status = "blocked" if "blocked" in predecessor or "rejected" in predecessor else (
+                "no-issues" if predecessor == {"no-issues"} else (
+                    "blocked" if "no-issues" in predecessor else "implemented"
+                )
+            )
+            issues = []
+            if status == "implemented":
+                issues = [{
+                    "number": 7,
+                    "content_digest": "issue-7",
+                    "plan_disposition": "implement",
+                    "depends_on": [],
+                    "design_required": scenario in {"design-approved", "design-rejected"},
+                    "design_ref": "DES-7" if scenario in {"design-approved", "design-rejected"} else "",
+                    "disposition": "implemented",
+                    "acceptance": ["works"],
+                    "files": ["fixture.py"],
+                    "tests": ["test_fixture"],
+                    "finding_ids": [],
+                }]
+                if scenario == "overlap":
+                    issues.append({
+                        "number": 8,
+                        "content_digest": "issue-8",
+                        "plan_disposition": "duplicate",
+                        "depends_on": [7],
+                        "design_required": False,
+                        "design_ref": "",
+                        "disposition": "duplicate",
+                        "acceptance": ["covered by issue 7"],
+                        "files": ["fixture.py"],
+                        "tests": ["test_fixture"],
+                        "finding_ids": [],
+                    })
+            output = {
+                "status": status,
+                "summary": "fixture",
+                "base_sha": base,
+                "issue_snapshot_digest": snapshot,
+                "issues": issues,
+                "changed_files": ["fixture.py"] if status == "implemented" else [],
+                "validations": validation if status == "implemented" else [],
+                "tree_digest": tree if status == "implemented" else "",
+                "diff_digest": diff if status == "implemented" else "",
+                "blockers": ["predecessor blocked"] if status == "blocked" else [],
+            }
+        elif kind == "batch-adversarial-review":
+            implementation = embedded("IMPLEMENTATION")
+            status = "no-issues" if implementation["status"] == "no-issues" else (
+                "blocked" if implementation["status"] == "blocked" else (
+                    "changes-required" if scenario in {"repair", "repair-blocked", "late-mixed"} else "approved"
+                )
+            )
+            output = {
+                "status": status,
+                "summary": "fixture",
+                "issue_snapshot_digest": snapshot,
+                "tree_digest": tree if status not in {"no-issues", "blocked"} else "",
+                "diff_digest": diff if status not in {"no-issues", "blocked"} else "",
+                "issue_traces": issue_traces(["F1"] if status == "changes-required" else []) if status not in {"no-issues", "blocked"} else [],
+                "findings": [finding] if status == "changes-required" else [],
+                "validations": validation if status not in {"no-issues", "blocked"} else [],
+                "blockers": ["predecessor blocked"] if status == "blocked" else [],
+            }
+        elif kind == "batch-repair":
+            adversarial = embedded("ADVERSARIAL_REVIEW")
+            status = "no-issues" if adversarial["status"] == "no-issues" else (
+                "blocked" if adversarial["status"] == "blocked" or scenario in {"repair-blocked", "late-mixed"} else (
+                    "repaired" if adversarial["status"] == "changes-required" else "no-repair"
+                )
+            )
+            repaired_tree = "3" * 64 if status == "repaired" else tree
+            repaired_diff = "4" * 64 if status == "repaired" else diff
+            output = {
+                "status": status,
+                "summary": "fixture",
+                "issue_snapshot_digest": snapshot,
+                "issue_traces": issue_traces(["F1"] if adversarial["status"] == "changes-required" else []) if status not in {"no-issues", "blocked"} else [],
+                "addressed_findings": ([{
+                    "finding_id": "F1",
+                    "disposition": "repaired",
+                    "resolution": "fixed",
+                    "test": "test_fixture",
+                }] if status == "repaired" else []),
+                "unresolved_findings": [],
+                "changed_files": ["fixture.py"] if status == "repaired" else [],
+                "validations": validation if status in {"repaired", "no-repair"} else [],
+                "tree_digest": repaired_tree if status in {"repaired", "no-repair"} else "",
+                "diff_digest": repaired_diff if status in {"repaired", "no-repair"} else "",
+                "blockers": (["repair blocked: adversarial finding F1"] if scenario == "repair-blocked" else (["predecessor blocked"] if status == "blocked" else [])),
+            }
+        elif kind == "batch-final-review":
+            adversarial = embedded("ADVERSARIAL_REVIEW")
+            repair = embedded("REPAIR")
+            if adversarial["status"] == "blocked" or repair["status"] == "blocked":
+                status = "blocked"
+            elif adversarial["status"] == "no-issues" and repair["status"] == "no-issues":
+                status = "no-issues"
+            elif "no-issues" in {adversarial["status"], repair["status"]}:
+                status = "blocked"
+            elif scenario == "final-rejected":
+                status = "rejected"
+            else:
+                status = "approved"
+            if scenario == "late-mixed":
+                status = "approved"
+            output = {
+                "status": status,
+                "summary": "fixture",
+                "issue_snapshot_digest": snapshot,
+                "reviewed_tree_digest": (
+                    "9" * 64 if scenario == "digest-mismatch" else repair["tree_digest"]
+                ) if status in {"approved", "rejected"} else "",
+                "reviewed_diff_digest": (
+                    "8" * 64 if scenario == "digest-mismatch" else repair["diff_digest"]
+                ) if status in {"approved", "rejected"} else "",
+                "reviewed_paths": ([{
+                    "path": "fixture.py",
+                    "mode": "100644",
+                    "change": "modified",
+                    "sha256": "5" * 64,
+                }] if status in {"approved", "rejected"} else []),
+                "issue_traces": issue_traces(["F1"] if scenario in {"repair", "repair-blocked"} else []) if status in {"approved", "rejected"} else [],
+                "finding_dispositions": ([{
+                    "finding_id": "F1",
+                    "status": "resolved",
+                    "resolution": "fixed",
+                    "test": "test_fixture",
+                }] if scenario == "repair" and status == "approved" else []),
+                "findings": ([{
+                    "id": "F2",
+                    "severity": "high",
+                    "issue_numbers": [7],
+                    "summary": "Final rejection",
+                    "evidence": "fixture",
+                }] if status == "rejected" else []),
+                "validations": validation if status in {"approved", "rejected"} else [],
+                "blockers": (
+                    ["final-review rejected: F2"] if status == "rejected" else (
+                        ["final-review blocked by repair finding F1"] if status == "blocked" and scenario == "repair-blocked" else (
+                            ["final gate"] if status == "blocked" else []
+                        )
+                    )
+                ),
+            }
+        else:
+            inventory = embedded("INVENTORY")
+            plan = embedded("PLAN")
+            design = embedded("DESIGN_GATE")
+            implementation = embedded("IMPLEMENTATION")
+            adversarial = embedded("ADVERSARIAL_REVIEW")
+            repair = embedded("REPAIR")
+            final_review = embedded("FINAL_REVIEW")
+            statuses = {
+                inventory["status"], plan["status"], design["status"],
+                implementation["status"], adversarial["status"], repair["status"],
+                final_review["status"],
+            }
+            upstream_blocked = bool(statuses & {"blocked", "rejected"})
+            digest_mismatch = final_review["status"] == "approved" and (
+                final_review["reviewed_tree_digest"] != repair["tree_digest"]
+                or final_review["reviewed_diff_digest"] != repair["diff_digest"]
+            )
+            if upstream_blocked or digest_mismatch:
+                status = "blocked"
+            elif statuses == {"no-issues"}:
+                status = "no-issues"
+            elif "no-issues" in statuses or final_review["status"] != "approved":
+                status = "blocked"
+            elif scenario == "prepared-write-failure":
+                status = "blocked"
+            elif scenario == "pending-reconciliation":
+                status = "published-pending-reconciliation"
+            else:
+                status = "delivered"
+            recovery_only = scenario == "recovery-only"
+            if status == "delivered":
+                actions = (
+                    [
+                        {"action": "recover-reconciliation", "status": "completed", "evidence": "fixture"},
+                        {"action": "verify-remote", "status": "completed", "evidence": "fixture"},
+                        {"action": "reinstall-plugin", "status": "completed", "evidence": "fixture"},
+                        {"action": "close-issues", "status": "completed", "evidence": "fixture"},
+                        {"action": "sync-repository-authority", "status": "completed", "evidence": "fixture"},
+                        {"action": "sync-delivery-task", "status": "completed", "evidence": "fixture"},
+                        {"action": "sync-feature-map", "status": "completed", "evidence": "fixture"},
+                    ] if recovery_only else [
+                        {"action": "commit", "status": "completed", "evidence": "fixture"},
+                        {"action": "persist-prepared", "status": "completed", "evidence": "fixture"},
+                        {"action": "push", "status": "completed", "evidence": "fixture"},
+                        {"action": "persist-published-pending", "status": "completed", "evidence": "fixture"},
+                        {"action": "verify-remote", "status": "completed", "evidence": "fixture"},
+                        {"action": "reinstall-plugin", "status": "completed", "evidence": "fixture"},
+                        {"action": "close-issues", "status": "completed", "evidence": "fixture"},
+                        {"action": "sync-repository-authority", "status": "completed", "evidence": "fixture"},
+                        {"action": "sync-delivery-task", "status": "completed", "evidence": "fixture"},
+                        {"action": "sync-feature-map", "status": "completed", "evidence": "fixture"},
+                    ]
+                )
+            elif status == "published-pending-reconciliation":
+                actions = [
+                    {"action": "commit", "status": "completed", "evidence": "fixture"},
+                    {"action": "persist-prepared", "status": "completed", "evidence": "fixture"},
+                    {"action": "push", "status": "completed", "evidence": "fixture"},
+                    {"action": "persist-published-pending", "status": "completed", "evidence": "fixture"},
+                ]
+            elif scenario == "prepared-write-failure":
+                actions = [
+                    {"action": "commit", "status": "completed", "evidence": "fixture"},
+                    {"action": "persist-prepared", "status": "failed", "evidence": "fixture"},
+                    {"action": "push", "status": "not-run", "evidence": "fixture"},
+                ]
+            else:
+                actions = []
+            output = {
+                "status": status,
+                "summary": "fixture",
+                "base_sha": base,
+                "reviewed_tree_digest": final_review["reviewed_tree_digest"] if final_review["status"] in {"approved", "rejected"} else "",
+                "reviewed_diff_digest": final_review["reviewed_diff_digest"] if final_review["status"] in {"approved", "rejected"} else "",
+                "issue_snapshot_digest": snapshot,
+                "delivered_sha": "b" * 40 if status in {"delivered", "published-pending-reconciliation"} else "",
+                "recovery_schema_version": "github-issues-batch-recovery.v1",
+                "recovery_phase": (
+                    "reconciled" if status == "delivered" else (
+                        "published-pending-reconciliation" if status == "published-pending-reconciliation" else "none"
+                    )
+                ),
+                "issues": ([
+                    {
+                        **trace,
+                        "status": "closed" if status == "delivered" and trace["plan_disposition"] == "implement" else "unchanged",
+                        "evidence": "fixture",
+                    }
+                    for trace in final_review["issue_traces"]
+                ] if status in {"delivered", "published-pending-reconciliation"} else []),
+                "recovery_manifest_digest": "manifest" if status in {"delivered", "published-pending-reconciliation"} else "",
+                "actions": actions,
+                "validations": validation if status in {"delivered", "published-pending-reconciliation"} else [],
+                "reconciliation": {
+                    "remote": "completed" if status == "delivered" else ("pending" if status == "published-pending-reconciliation" else "not-started"),
+                    "plugin": "completed" if status == "delivered" else "not-started",
+                    "issues": "completed" if status == "delivered" else "not-started",
+                    "repository_authority": "completed" if status == "delivered" else "not-started",
+                    "delivery_task": "completed" if status == "delivered" else "not-started",
+                    "feature_map": "completed" if status == "delivered" else "not-started",
+                    "evidence": ["fixture"] if status in {"delivered", "published-pending-reconciliation"} else [],
+                },
+                "blockers": (
+                    [(
+                        "deliver blocked by digest mismatch"
+                        if digest_mismatch else
+                        (
+                            "deliver blocked by prepared manifest persistence"
+                            if scenario == "prepared-write-failure" else
+                            (
+                                f"deliver blocked by repair {repair['status']}: " + ",".join(repair["blockers"])
+                                if repair["status"] == "blocked" else
+                                f"deliver blocked by final-review {final_review['status']}: " + ",".join(final_review["blockers"])
+                            )
+                        )
+                    )]
+                    if status == "blocked" else []
+                ),
+            }
     elif identity["kind"] == "github-discover":
         cursor = str(identity.get("cursor") or "0")
         output = {
@@ -1760,6 +2213,202 @@ class LoopWorkflowTests(ExecRunnerTestCase):
         for task_id in ("implement", "repair", "deliver"):
             self.assertEqual(effective[task_id], (inputs["coding-model"], inputs["coding-effort"]))
         self.assertEqual(effective["final-review"], (inputs["gate-model"], inputs["gate-effort"]))
+
+    def test_github_issues_batch_is_finite_bounded_and_review_gated(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        directory = repository / ".codex/exec-workflows/github-issues-batch"
+        workflow = load_workflow(directory / "workflow.json", repository)
+        self.assertIsNone(workflow["loop"])
+        self.assertEqual(workflow["max_parallel"], 1)
+        self.assertEqual(
+            workflow["order"],
+            ["inventory", "plan-design", "design-review", "implement", "adversarial-review", "repair", "final-review", "deliver"],
+        )
+        prompts = {task_id: task["prompt"] for task_id, task in workflow["tasks"].items()}
+        for marker in ("absolute limit is 100 issues", "terminal cancelled", "16 KiB", "256 KiB", "do not edit files"):
+            self.assertIn(marker, prompts["inventory"])
+        inputs = json.loads((directory / "example-inputs.json").read_text(encoding="utf-8"))
+        self.assertNotIn("max-issues", workflow["inputs"])
+        self.assertNotIn("max-issues", inputs)
+        self.assertIn("draft content and review evidence", prompts["plan-design"])
+        self.assertIn("zero actionable finding", prompts["design-review"])
+        self.assertEqual(workflow["tasks"]["design-review"]["sandbox"], "read-only")
+        self.assertIn("one pass implement", prompts["implement"])
+        self.assertIn("Adversarial read-only review", prompts["adversarial-review"])
+        self.assertIn("single plugin cachebuster update", prompts["repair"])
+        self.assertIn("exact complete publishable diff", prompts["final-review"])
+        for task_id in workflow["order"][:-1]:
+            self.assertIn(f"{{{{ tasks.{task_id}.output }}}}", prompts["deliver"])
+        for marker in ("final-review.status is exactly approved", "Never modify tracked files", "atomic rename", "mode 0600", "published-pending-reconciliation", "never rebuilds or repushes"):
+            self.assertIn(marker, prompts["deliver"])
+        schemas = {task["output_schema"] for task in workflow["tasks"].values()}
+        self.assertEqual(len(schemas), 8)
+
+        code, stdout, stderr = self.invoke(
+            "plan", str(directory), "--inputs", str(directory / "example-inputs.json"), "--max-calls", "8"
+        )
+        self.assertEqual(code, 0, stderr)
+        plan = json.loads(stdout)
+        self.assertEqual(plan["planned_calls"], 8)
+        self.assertEqual(plan["tasks"][2]["model"], "gpt-5.6-sol")
+        self.assertEqual(plan["tasks"][4]["reasoning_effort"], "high")
+
+    def test_github_issues_batch_fake_codex_status_paths(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        directory = repository / ".codex/exec-workflows/github-issues-batch"
+        scenarios = {
+            "no-issues": ("no-issues", "no-issues", "no-issues", "no-issues", "no-issues"),
+            "no-design": ("not-required", "approved", "no-repair", "approved", "delivered"),
+            "design-approved": ("approved", "approved", "no-repair", "approved", "delivered"),
+            "design-rejected": ("rejected", "blocked", "blocked", "blocked", "blocked"),
+            "overlap": ("not-required", "approved", "no-repair", "approved", "delivered"),
+            "repair": ("not-required", "changes-required", "repaired", "approved", "delivered"),
+            "repair-blocked": ("not-required", "changes-required", "blocked", "blocked", "blocked"),
+            "late-mixed": ("not-required", "changes-required", "blocked", "approved", "blocked"),
+            "dirty-base": ("blocked", "blocked", "blocked", "blocked", "blocked"),
+            "overflow": ("blocked", "blocked", "blocked", "blocked", "blocked"),
+            "unstable-reread": ("blocked", "blocked", "blocked", "blocked", "blocked"),
+            "snapshot-mismatch": ("blocked", "blocked", "blocked", "blocked", "blocked"),
+            "spurious-no-issues": ("blocked", "blocked", "blocked", "blocked", "blocked"),
+            "mixed-state": ("blocked", "blocked", "blocked", "blocked", "blocked"),
+            "final-rejected": ("not-required", "approved", "no-repair", "rejected", "blocked"),
+            "digest-mismatch": ("not-required", "approved", "no-repair", "approved", "blocked"),
+            "prepared-write-failure": ("not-required", "approved", "no-repair", "approved", "blocked"),
+            "pending-reconciliation": ("not-required", "approved", "no-repair", "approved", "published-pending-reconciliation"),
+            "recovery-only": ("not-required", "approved", "no-repair", "approved", "delivered"),
+        }
+        for scenario, expected in scenarios.items():
+            with self.subTest(scenario=scenario), patch.dict(
+                os.environ, {"FAKE_BATCH_SCENARIO": scenario}, clear=False
+            ):
+                before = set(self.data.glob("exec-runs/*/*/run.json"))
+                code, _, stderr = self.invoke(
+                    "run",
+                    str(directory),
+                    "--inputs",
+                    str(directory / "example-inputs.json"),
+                    "--max-calls",
+                    "8",
+                    "--allow-workspace-write",
+                    "--allow-danger-full-access",
+                    "--codex-bin",
+                    str(self.fake_codex),
+                )
+                self.assertEqual(code, 0, stderr)
+                created = set(self.data.glob("exec-runs/*/*/run.json")) - before
+                self.assertEqual(len(created), 1)
+                run_dir = created.pop().parent
+                outputs = {
+                    task_id: json.loads(
+                        (run_dir / "tasks" / task_id / "final.json").read_text(encoding="utf-8")
+                    )
+                    for task_id in (
+                        "plan-design",
+                        "design-review",
+                        "implement",
+                        "adversarial-review",
+                        "repair",
+                        "final-review",
+                        "deliver",
+                    )
+                }
+                self.assertEqual(outputs["design-review"]["status"], expected[0])
+                self.assertEqual(outputs["adversarial-review"]["status"], expected[1])
+                self.assertEqual(outputs["repair"]["status"], expected[2])
+                self.assertEqual(outputs["final-review"]["status"], expected[3])
+                self.assertEqual(outputs["deliver"]["status"], expected[4])
+                if scenario == "overlap":
+                    self.assertEqual(
+                        [item["disposition"] for item in outputs["plan-design"]["items"]],
+                        ["implement", "duplicate"],
+                    )
+                    self.assertEqual(
+                        [item["number"] for item in outputs["deliver"]["issues"]],
+                        [7, 8],
+                    )
+                    self.assertEqual(outputs["deliver"]["issues"][1]["depends_on"], [7])
+                    self.assertEqual(outputs["deliver"]["issues"][1]["files"], ["fixture.py"])
+                    self.assertEqual(outputs["deliver"]["issues"][1]["tests"], ["test_fixture"])
+                if scenario == "repair":
+                    self.assertEqual(
+                        outputs["final-review"]["finding_dispositions"][0]["status"],
+                        "resolved",
+                    )
+                    self.assertEqual(
+                        outputs["deliver"]["reviewed_tree_digest"],
+                        outputs["final-review"]["reviewed_tree_digest"],
+                    )
+                    self.assertEqual(
+                        outputs["deliver"]["reviewed_diff_digest"],
+                        outputs["final-review"]["reviewed_diff_digest"],
+                    )
+                    self.assertNotEqual(
+                        outputs["implement"]["diff_digest"],
+                        outputs["repair"]["diff_digest"],
+                    )
+                    self.assertEqual(
+                        outputs["repair"]["diff_digest"],
+                        outputs["final-review"]["reviewed_diff_digest"],
+                    )
+                if expected[4] == "blocked":
+                    self.assertEqual(outputs["deliver"]["delivered_sha"], "")
+                    self.assertTrue(outputs["deliver"]["blockers"])
+                    self.assertEqual(outputs["deliver"]["recovery_phase"], "none")
+                    completed_actions = {
+                        item["action"]
+                        for item in outputs["deliver"]["actions"]
+                        if item["status"] == "completed"
+                    }
+                    self.assertNotIn("push", completed_actions)
+                    self.assertNotIn("persist-published-pending", completed_actions)
+                    self.assertTrue(
+                        all(
+                            value == "not-started"
+                            for key, value in outputs["deliver"]["reconciliation"].items()
+                            if key != "evidence"
+                        )
+                    )
+                if scenario == "pending-reconciliation":
+                    self.assertEqual(
+                        outputs["deliver"]["reconciliation"]["remote"], "pending"
+                    )
+                    self.assertEqual(
+                        [item["action"] for item in outputs["deliver"]["actions"]],
+                        ["commit", "persist-prepared", "push", "persist-published-pending"],
+                    )
+                if scenario == "prepared-write-failure":
+                    self.assertEqual(
+                        [(item["action"], item["status"]) for item in outputs["deliver"]["actions"]],
+                        [
+                            ("commit", "completed"),
+                            ("persist-prepared", "failed"),
+                            ("push", "not-run"),
+                        ],
+                    )
+                if scenario == "recovery-only":
+                    recovery_actions = [item["action"] for item in outputs["deliver"]["actions"]]
+                    self.assertEqual(recovery_actions[0], "recover-reconciliation")
+                    self.assertNotIn("commit", recovery_actions)
+                    self.assertNotIn("push", recovery_actions)
+                rendered_deliver = (
+                    run_dir / "tasks" / "deliver" / "prompt.txt"
+                ).read_text(encoding="utf-8")
+                self.assertIn(
+                    f'"status": "{outputs["final-review"]["status"]}"',
+                    rendered_deliver,
+                )
+                self.assertLess(
+                    rendered_deliver.index("Stage and create exactly one batch commit"),
+                    rendered_deliver.index("atomically persist phase prepared"),
+                )
+                self.assertLess(
+                    rendered_deliver.index("atomically persist phase prepared"),
+                    rendered_deliver.index("Non-force push only"),
+                )
+                self.assertLess(
+                    rendered_deliver.index("atomically persist phase published-pending-reconciliation"),
+                    rendered_deliver.index("Then idempotently verify remote"),
+                )
 
     def test_bundled_monitors_validate_install_and_deny_mutations(self) -> None:
         for name in ("loop-monitor", "github-issue-worker"):

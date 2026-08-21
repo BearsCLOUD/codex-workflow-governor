@@ -1,0 +1,49 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["implemented", "no-issues", "blocked"]},
+    "summary": {"type": "string"},
+    "base_sha": {"type": "string"},
+    "issue_snapshot_digest": {"type": "string"},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": {"type": "integer"},
+          "content_digest": {"type": "string"},
+          "plan_disposition": {"type": "string", "enum": ["implement", "duplicate", "superseded"]},
+          "depends_on": {"type": "array", "items": {"type": "integer"}},
+          "design_required": {"type": "boolean"},
+          "design_ref": {"type": "string"},
+          "disposition": {"type": "string", "enum": ["implemented", "duplicate", "superseded"]},
+          "acceptance": {"type": "array", "items": {"type": "string"}},
+          "files": {"type": "array", "items": {"type": "string"}},
+          "tests": {"type": "array", "items": {"type": "string"}},
+          "finding_ids": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["number", "content_digest", "plan_disposition", "depends_on", "design_required", "design_ref", "disposition", "acceptance", "files", "tests", "finding_ids"],
+        "additionalProperties": false
+      }
+    },
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "validations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "status": {"type": "string", "enum": ["passed", "failed"]},
+          "evidence": {"type": "string"}
+        },
+        "required": ["name", "status", "evidence"],
+        "additionalProperties": false
+      }
+    },
+    "tree_digest": {"type": "string"},
+    "diff_digest": {"type": "string"},
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "summary", "base_sha", "issue_snapshot_digest", "issues", "changed_files", "validations", "tree_digest", "diff_digest", "blockers"],
+  "additionalProperties": false
+}

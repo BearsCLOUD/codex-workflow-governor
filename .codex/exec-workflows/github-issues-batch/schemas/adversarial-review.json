@@ -1,0 +1,62 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["approved", "changes-required", "no-issues", "blocked"]},
+    "summary": {"type": "string"},
+    "issue_snapshot_digest": {"type": "string"},
+    "tree_digest": {"type": "string"},
+    "diff_digest": {"type": "string"},
+    "issue_traces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": {"type": "integer"},
+          "content_digest": {"type": "string"},
+          "plan_disposition": {"type": "string", "enum": ["implement", "duplicate", "superseded"]},
+          "depends_on": {"type": "array", "items": {"type": "integer"}},
+          "design_required": {"type": "boolean"},
+          "design_ref": {"type": "string"},
+          "acceptance": {"type": "array", "items": {"type": "string"}},
+          "files": {"type": "array", "items": {"type": "string"}},
+          "tests": {"type": "array", "items": {"type": "string"}},
+          "finding_ids": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["number", "content_digest", "plan_disposition", "depends_on", "design_required", "design_ref", "acceptance", "files", "tests", "finding_ids"],
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+          "issue_numbers": {"type": "array", "items": {"type": "integer"}},
+          "summary": {"type": "string"},
+          "evidence": {"type": "string"},
+          "required_test": {"type": "string"}
+        },
+        "required": ["id", "severity", "issue_numbers", "summary", "evidence", "required_test"],
+        "additionalProperties": false
+      }
+    },
+    "validations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "status": {"type": "string", "enum": ["passed", "failed"]},
+          "evidence": {"type": "string"}
+        },
+        "required": ["name", "status", "evidence"],
+        "additionalProperties": false
+      }
+    },
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "summary", "issue_snapshot_digest", "tree_digest", "diff_digest", "issue_traces", "findings", "validations", "blockers"],
+  "additionalProperties": false
+}

@@ -1,0 +1,46 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["planned", "no-issues", "blocked"]},
+    "summary": {"type": "string"},
+    "base_sha": {"type": "string"},
+    "issue_snapshot_digest": {"type": "string"},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": {"type": "integer"},
+          "content_digest": {"type": "string"},
+          "disposition": {"type": "string", "enum": ["implement", "duplicate", "superseded"]},
+          "depends_on": {"type": "array", "items": {"type": "integer"}},
+          "design_required": {"type": "boolean"},
+          "design_ref": {"type": "string"},
+          "acceptance": {"type": "array", "items": {"type": "string"}},
+          "files": {"type": "array", "items": {"type": "string"}},
+          "tests": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["number", "content_digest", "disposition", "depends_on", "design_required", "design_ref", "acceptance", "files", "tests"],
+        "additionalProperties": false
+      }
+    },
+    "design_drafts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "page_id": {"type": "string"},
+          "revision": {"type": "integer"},
+          "status": {"type": "string", "enum": ["Designing", "Review"]},
+          "issue_numbers": {"type": "array", "items": {"type": "integer"}},
+          "evidence_digest": {"type": "string"}
+        },
+        "required": ["page_id", "revision", "status", "issue_numbers", "evidence_digest"],
+        "additionalProperties": false
+      }
+    },
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "summary", "base_sha", "issue_snapshot_digest", "items", "design_drafts", "blockers"],
+  "additionalProperties": false
+}

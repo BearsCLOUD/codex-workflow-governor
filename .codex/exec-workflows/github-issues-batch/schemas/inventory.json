@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["ready", "no-issues", "blocked"]},
+    "summary": {"type": "string"},
+    "base_sha": {"type": "string"},
+    "remote_sha": {"type": "string"},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": {"type": "integer"},
+          "updated_at": {"type": "string"},
+          "digest": {"type": "string"},
+          "title_bytes": {"type": "integer"},
+          "body_bytes": {"type": "integer"}
+        },
+        "required": ["number", "updated_at", "digest", "title_bytes", "body_bytes"],
+        "additionalProperties": false
+      }
+    },
+    "aggregate_bytes": {"type": "integer"},
+    "issue_snapshot_digest": {"type": "string"},
+    "writer_runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string"},
+          "status": {"type": "string", "enum": ["cancelled"]},
+          "evidence_digest": {"type": "string"}
+        },
+        "required": ["run_id", "status", "evidence_digest"],
+        "additionalProperties": false
+      }
+    },
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "summary", "base_sha", "remote_sha", "issues", "aggregate_bytes", "issue_snapshot_digest", "writer_runs", "blockers"],
+  "additionalProperties": false
+}

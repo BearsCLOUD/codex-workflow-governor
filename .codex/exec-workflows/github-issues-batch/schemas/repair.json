@@ -1,0 +1,75 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["repaired", "no-repair", "no-issues", "blocked"]},
+    "summary": {"type": "string"},
+    "issue_snapshot_digest": {"type": "string"},
+    "issue_traces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": {"type": "integer"},
+          "content_digest": {"type": "string"},
+          "plan_disposition": {"type": "string", "enum": ["implement", "duplicate", "superseded"]},
+          "depends_on": {"type": "array", "items": {"type": "integer"}},
+          "design_required": {"type": "boolean"},
+          "design_ref": {"type": "string"},
+          "acceptance": {"type": "array", "items": {"type": "string"}},
+          "files": {"type": "array", "items": {"type": "string"}},
+          "tests": {"type": "array", "items": {"type": "string"}},
+          "finding_ids": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["number", "content_digest", "plan_disposition", "depends_on", "design_required", "design_ref", "acceptance", "files", "tests", "finding_ids"],
+        "additionalProperties": false
+      }
+    },
+    "addressed_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding_id": {"type": "string"},
+          "disposition": {"type": "string", "enum": ["repaired", "no-action", "blocked"]},
+          "resolution": {"type": "string"},
+          "test": {"type": "string"}
+        },
+        "required": ["finding_id", "disposition", "resolution", "test"],
+        "additionalProperties": false
+      }
+    },
+    "unresolved_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+          "issue_numbers": {"type": "array", "items": {"type": "integer"}},
+          "summary": {"type": "string"}
+        },
+        "required": ["id", "severity", "issue_numbers", "summary"],
+        "additionalProperties": false
+      }
+    },
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "validations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "status": {"type": "string", "enum": ["passed", "failed"]},
+          "evidence": {"type": "string"}
+        },
+        "required": ["name", "status", "evidence"],
+        "additionalProperties": false
+      }
+    },
+    "tree_digest": {"type": "string"},
+    "diff_digest": {"type": "string"},
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "summary", "issue_snapshot_digest", "issue_traces", "addressed_findings", "unresolved_findings", "changed_files", "validations", "tree_digest", "diff_digest", "blockers"],
+  "additionalProperties": false
+}

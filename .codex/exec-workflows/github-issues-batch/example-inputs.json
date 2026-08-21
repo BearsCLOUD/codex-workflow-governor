@@ -1,0 +1,15 @@
+{
+  "repository": "BearsCLOUD/codex-workflow-governor",
+  "authoritative-branch": "main",
+  "canonical-checkout": "/home/ai1/workflow_plugin",
+  "plugin-selector": "codex-workflow-governor@personal",
+  "design-page-id": "3c29df3a-2eed-81ad-961f-d76cebf08af6",
+  "delivery-task-id": "3c39df3a-2eed-81d8-91a3-e5a7665f58f6",
+  "feature-map-id": "3c29df3a-2eed-813a-ac72-dc8d198808e1",
+  "planning-model": "gpt-5.6-luna",
+  "planning-effort": "high",
+  "gate-model": "gpt-5.6-sol",
+  "gate-effort": "medium",
+  "adversarial-model": "gpt-5.6-sol",
+  "adversarial-effort": "high"
+}
