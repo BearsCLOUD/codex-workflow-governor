@@ -1,5 +1,10 @@
 # Repository Instructions
 
+## Scope and Simplicity
+
+- Use the smallest implementation that directly achieves the requested outcome. Do not add abstractions, frameworks, governance layers, recovery machinery, or generalized infrastructure unless the requested outcome requires them or the user explicitly asks for them.
+- Do not perform work outside the stated goal. Every action must have a direct and necessary causal path to the originally intended result; omit opportunistic cleanup, refactoring, audits, documentation, and adjacent improvements that do not directly enable that result.
+
 ## Delivery
 
 - After completing and validating a requested repository change, commit the complete scoped change and push it to the authoritative upstream branch in the same task. Do not leave finished work only in the working tree unless the user explicitly says not to commit or push, or the remote blocks publication.
