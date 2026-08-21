@@ -364,7 +364,12 @@ try:
             value, _ = json.JSONDecoder().raw_decode(prompt[start:])
             return value
         no_issues = scenario == "no-issues"
-        preflight_blocked = scenario in {"dirty-base", "overflow", "unstable-reread"}
+        preflight_blocked = scenario in {
+            "active-writer",
+            "dirty-base",
+            "overflow",
+            "unstable-reread",
+        }
         design_rejected = scenario == "design-rejected"
         snapshot = "snapshot-1"
         base = "a" * 40
@@ -415,8 +420,8 @@ try:
                     "number": 7,
                     "updated_at": "2026-08-21T00:00:00Z",
                     "digest": "issue-7",
-                    "title_bytes": 7,
-                    "body_bytes": 11,
+                    "title_bytes": 78 if scenario == "large-issue" else 7,
+                    "body_bytes": 22602 if scenario == "large-issue" else 11,
                 }]
                 if scenario == "overlap":
                     issues.append({
@@ -426,16 +431,25 @@ try:
                         "title_bytes": 8,
                         "body_bytes": 12,
                     })
+            aggregate_bytes = sum(item["title_bytes"] + item["body_bytes"] for item in issues)
+            if scenario == "overflow":
+                aggregate_bytes = 262145
+            blocker = {
+                "active-writer": "different nonterminal same-repository persistent writer",
+                "dirty-base": "canonical checkout does not match remote base",
+                "overflow": "aggregate issue evidence exceeds 256 KiB",
+                "unstable-reread": "issue snapshot changed during reread",
+            }.get(scenario)
             output = {
                 "status": status,
                 "summary": "fixture",
                 "base_sha": base,
                 "remote_sha": base,
                 "issues": issues,
-                "aggregate_bytes": sum(item["title_bytes"] + item["body_bytes"] for item in issues),
+                "aggregate_bytes": aggregate_bytes,
                 "issue_snapshot_digest": snapshot,
                 "writer_runs": [{"run_id": "old-loop", "status": "cancelled", "evidence_digest": "terminal"}],
-                "blockers": ["inventory bound or base failure"] if preflight_blocked else [],
+                "blockers": [blocker] if blocker else [],
             }
         elif kind == "batch-plan-design":
             inventory = embedded("INVENTORY")
@@ -2225,8 +2239,19 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             ["inventory", "plan-design", "design-review", "implement", "adversarial-review", "repair", "final-review", "deliver"],
         )
         prompts = {task_id: task["prompt"] for task_id, task in workflow["tasks"].items()}
-        for marker in ("absolute limit is 100 issues", "terminal cancelled", "16 KiB", "256 KiB", "do not edit files"):
+        for marker in (
+            "absolute limit is 100 issues",
+            "aggregate complete issue evidence is at most 256 KiB",
+            "There is no per-issue byte ceiling",
+            "different nonterminal run",
+            "non-null root loop",
+            "do not edit files",
+        ):
             self.assertIn(marker, prompts["inventory"])
+        self.assertNotIn("16 KiB", "\n".join(prompts.values()))
+        for task_id in ("inventory", "implement", "repair", "deliver"):
+            for marker in ("different nonterminal", "finite run", "terminal", "other repo"):
+                self.assertIn(marker, prompts[task_id])
         inputs = json.loads((directory / "example-inputs.json").read_text(encoding="utf-8"))
         self.assertNotIn("max-issues", workflow["inputs"])
         self.assertNotIn("max-issues", inputs)
@@ -2267,6 +2292,9 @@ class LoopWorkflowTests(ExecRunnerTestCase):
             "late-mixed": ("not-required", "changes-required", "blocked", "approved", "blocked"),
             "dirty-base": ("blocked", "blocked", "blocked", "blocked", "blocked"),
             "overflow": ("blocked", "blocked", "blocked", "blocked", "blocked"),
+            "active-writer": ("blocked", "blocked", "blocked", "blocked", "blocked"),
+            "large-issue": ("not-required", "approved", "no-repair", "approved", "delivered"),
+            "self-writer": ("not-required", "approved", "no-repair", "approved", "delivered"),
             "unstable-reread": ("blocked", "blocked", "blocked", "blocked", "blocked"),
             "snapshot-mismatch": ("blocked", "blocked", "blocked", "blocked", "blocked"),
             "spurious-no-issues": ("blocked", "blocked", "blocked", "blocked", "blocked"),
@@ -2303,6 +2331,7 @@ class LoopWorkflowTests(ExecRunnerTestCase):
                         (run_dir / "tasks" / task_id / "final.json").read_text(encoding="utf-8")
                     )
                     for task_id in (
+                        "inventory",
                         "plan-design",
                         "design-review",
                         "implement",
@@ -2317,6 +2346,18 @@ class LoopWorkflowTests(ExecRunnerTestCase):
                 self.assertEqual(outputs["repair"]["status"], expected[2])
                 self.assertEqual(outputs["final-review"]["status"], expected[3])
                 self.assertEqual(outputs["deliver"]["status"], expected[4])
+                if scenario == "large-issue":
+                    self.assertEqual(outputs["inventory"]["status"], "ready")
+                    self.assertEqual(outputs["inventory"]["issues"][0]["title_bytes"], 78)
+                    self.assertEqual(outputs["inventory"]["issues"][0]["body_bytes"], 22602)
+                    self.assertEqual(outputs["inventory"]["aggregate_bytes"], 22680)
+                if scenario == "overflow":
+                    self.assertEqual(outputs["inventory"]["aggregate_bytes"], 262145)
+                if scenario == "self-writer":
+                    self.assertEqual(outputs["inventory"]["status"], "ready")
+                if scenario == "active-writer":
+                    self.assertEqual(outputs["inventory"]["status"], "blocked")
+                    self.assertIn("different nonterminal same-repository", outputs["inventory"]["blockers"][0])
                 if scenario == "overlap":
                     self.assertEqual(
                         [item["disposition"] for item in outputs["plan-design"]["items"]],
